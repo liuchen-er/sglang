@@ -276,6 +276,12 @@ from sglang.srt.utils.tensor_bridge import use_mlx
 from sglang.srt.utils.torch_memory_saver_adapter import TorchMemorySaverAdapter
 from sglang.utils import TypeBasedDispatcher, get_exception_traceback
 
+from sglang.srt.managers.adaptive_chunk_policy import (
+    AdaptiveChunkConfig,
+    AdaptiveChunkPolicy,
+)
+
+
 if is_mps():
     CudaStreamContext = nullcontext
     from sglang.srt.hardware_backend.mlx.scheduler_mixin import SchedulerMlxOverlapMixin
@@ -1034,6 +1040,57 @@ class Scheduler(
                     "Dynamic chunking will be disabled."
                 )
                 self.enable_dynamic_chunking = False
+
+        self.load_aware_chunk_policy = None
+        self._last_load_aware_chunk_size = None
+
+        if self.server_args.enable_load_aware_chunking:
+            if self.chunked_prefill_size is None:
+                raise ValueError("--enable-load-aware-chunking requires "
+                    "--chunked-prefill-size > 0")
+            if not self.is_mixed_chunk:
+                raise ValueError(
+                    "--enable-load-aware-chunking requires "
+                )
+
+            # 自适应策略和上面的动态chunk不是一回事，不能两个开关同时打开
+            if self.enable_dynamic_chunking:
+                raise ValueError(  "--enable-load-aware-chunking cannot be used "
+                    "with --enable-dynamic-chunking")
+
+            adaptive_max_chunk = (self.server_args.adaptive_chunk_max
+                                  if self.server_args.adaptive_chunk_max is not None else self.chunked_prefill_size)
+
+            config = AdaptiveChunkConfig(
+                min_chunk=self.server_args.adaptive_chunk_min,
+                small_chunk=self.server_args.adaptive_chunk_small,
+                medium_chunk=self.server_args.adaptive_chunk_medium,
+                max_chunk=adaptive_max_chunk,
+                decode_low_watermark=self.server_args.adaptive_decode_low_watermark,
+                decode_high_watermark=self.server_args.adaptive_decode_high_watermark,
+                prefill_queue_high_watermark=self.server_args.adaptive_prefill_queue_high_watermark,
+            )
+
+            self.load_aware_chunk_policy = AdaptiveChunkPolicy(
+                config,
+                page_size=self.page_size,
+                launch_chunk_size=self.chunked_prefill_size
+            )
+
+            logger.info(
+                "[Load-Aware Chunk] enabled: "
+                "min=%d, small=%d, medium=%d, max=%d, "
+                "decode_low=%d, decode_high=%d, "
+                "prefill_queue_high=%d",
+                config.min_chunk,
+                config.small_chunk,
+                config.medium_chunk,
+                config.max_chunk,
+                config.decode_low_watermark,
+                config.decode_high_watermark,
+                config.prefill_queue_high_watermark,
+            )
+
 
     def init_metrics_reporter(
         self, tp_rank: int, pp_rank: int, dp_rank: Optional[int]
@@ -2821,6 +2878,20 @@ class Scheduler(
             dynamic_size = self.predict_next_chunk_size(history_len)
             if dynamic_size is not None:
                 chunked_prefill_size = dynamic_size
+
+        if self.load_aware_chunk_policy is not None:
+            chunked_prefill_size = (
+                self.load_aware_chunk_policy.choose(
+                    decode_batch_size=running_bs,
+                    waiting_prefill_size=len(self.waiting_queue),
+                )
+            )
+
+            if chunked_prefill_size != self._last_load_aware_chunk_size :
+                logger.info("load aware step=%d, decode_bs = %d, waiting_prefill=%d, chunk=%d",
+                            self.forward_ct, running_bs, len(self.waiting_queue), chunked_prefill_size)
+
+                self._last_load_aware_chunk_size = chunked_prefill_size
 
         # Prefill policy
         adder = PrefillAdder(
