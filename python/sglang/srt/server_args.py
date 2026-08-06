@@ -660,6 +660,55 @@ class ServerArgs:
         bool,
         "Enable dynamic chunk size adjustment for pipeline parallelism. When enabled, chunk sizes are dynamically calculated based on fitted function to maintain consistent execution time across chunks.",
     ] = False
+
+    enable_load_aware_chunking: A[
+        bool,
+        (
+            "Eable load-aware chunked prefill."
+            "The scheduler chooses a per-step chunk size using "
+            "the running decode batch size and waiting prefill queue."
+        ),
+    ] = False
+
+    adaptive_chunk_min: A[
+        int,
+        "Minimum chunk size for load-aware chunking.",
+    ] = 512
+
+    adaptive_chunk_small: A[
+        int,
+        "Small chunk size for load-aware chunking.",
+    ] = 1024
+
+    adaptive_chunk_medium: A[
+        int,
+        "Medium chunk size for load-aware chunking.",
+    ] = 2048
+
+    adaptive_chunk_max: A[
+        Optional[int],
+        ( "Maximum chunk size for load-aware chunking. "
+            "Defaults to --chunked-prefill-size."),
+    ] = None
+
+    adaptive_decode_low_watermark: A[
+        int,
+        "Decode batch-size low watermark.",
+    ] = 4
+
+    adaptive_decode_high_watermark: A[
+        int,
+        "Decode batch-size high watermark.",
+    ] = 12
+
+    adaptive_prefill_queue_high_watermark: A[
+        int,
+        (
+            "Waiting-prefill queue watermark used to increase "
+            "the chunk size and reduce prefill starvation."
+        ),
+    ] = 8
+
     max_prefill_tokens: A[
         int,
         Arg(
