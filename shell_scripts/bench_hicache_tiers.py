@@ -173,27 +173,34 @@ def generate(input_ids, name: str):
 
     return result
 
+def refresh_hicache_metrics(seed: int = 987654):
+    """
+    hicache_host_used_tokens 是周期更新的 Gauge，
+    /metrics 本身不会主动读取 Host Pool。
 
-def wait_host_backup(
-        old_used: float,
-        timeout=10,
-):
-    deadline = time.time() + timeout
+    因此发送一个不共享前缀的短 Prefill 请求，
+    强制 Scheduler 执行 report_prefill_stats()，
+    从而调用 _log_hicache_stats() 更新 Host Pool Gauge。
 
-    while time.time() < deadline:
-        cur = get_metric(
-            "sglang:hicache_host_used_tokens"
-        )
+    注意：
+    这个 probe 自己产生的 Host Backup 在该次 Prefill
+    metrics 采样之后才发生，因此当前采样主要反映 probe
+    开始前已经存在的 Host KV。
+    """
 
-        if cur > old_used:
-            return cur
-
-        time.sleep(0.5)
-
-    return get_metric(
-        "sglang:hicache_host_used_tokens"
+    probe_ids = make_random_ids(
+        128,
+        seed=seed,
     )
 
+    generate(
+        probe_ids,
+        f"metrics_refresh_{seed}",
+    )
+
+    time.sleep(0.2)
+
+    return snapshot_metrics()
 
 def append_result(row):
     RESULT_FILE.parent.mkdir(
@@ -248,6 +255,7 @@ VOCAB_SIZE    = {VOCAB_SIZE}
 
     print(
         "Metrics after flush:",
+        "(host_used may be stale):",
         base_metrics,
     )
 
@@ -276,12 +284,40 @@ VOCAB_SIZE    = {VOCAB_SIZE}
     metrics_after_cold = snapshot_metrics()
 
     # -------------------------------------------------
-    # 2. L1 Hit
-    #
-    # 这里同时再次访问一次 target。
-    # 对 chunked prefill，write-through 的 hit_count
-    # 在 chunked 中不会更新，因此重复访问有助于确保
-    # 对应节点真正完成 Host Backup。
+    # 2. 等待 Cold Request 的异步 Write-through
+    # -------------------------------------------------
+
+    # HiCache CPU write-through 是异步执行的。
+    # 给 DMA / ack 一点处理时间。
+    time.sleep(1.0)
+
+    # 主动制造一次 Prefill，让 Prometheus 中的
+    # hicache_host_used_tokens 更新。
+    metrics_after_backup = refresh_hicache_metrics(
+        seed=888001
+    )
+
+    host_used = metrics_after_backup["host_used"]
+
+    print(
+        "Metrics after target backup refresh:",
+        metrics_after_backup,
+    )
+
+    if host_used <= 0:
+        raise RuntimeError(
+            "Host KV is still zero after an explicit metrics refresh. "
+            "Now this is likely a real L2 backup problem, not a stale "
+            "Prometheus gauge."
+        )
+
+    print(
+        f"Host backup observed after metrics refresh: "
+        f"host_used={host_used}"
+    )
+
+    # -------------------------------------------------
+    # 3. 再请求一次 Target，验证 L1 Hit
     # -------------------------------------------------
 
     l1 = generate(
@@ -289,47 +325,15 @@ VOCAB_SIZE    = {VOCAB_SIZE}
         "l1_hit",
     )
 
-    # 等待异步 write-through 完成
-    host_used = wait_host_backup(
-        base_metrics["host_used"],
-        timeout=10,
-    )
+    time.sleep(0.2)
 
-    # 某些节点如果还没有完成 Host Backup，
-    # 再访问一次并等待。
-    warm_round = 0
-
-    while (
-            host_used <= base_metrics["host_used"]
-            and warm_round < 3
+    if (
+            l1["cached_tokens"] is not None
+            and l1["cached_tokens"] <= 0
     ):
-        warm_round += 1
-
-        print(
-            f"Host backup not observed, "
-            f"extra warm round={warm_round}"
-        )
-
-        generate(
-            target_ids,
-            f"extra_l1_warm_{warm_round}",
-        )
-
-        host_used = wait_host_backup(
-            base_metrics["host_used"],
-            timeout=10,
-        )
-
-    if host_used <= base_metrics["host_used"]:
         raise RuntimeError(
-            "Target KV has not been observed in Host KV cache. "
-            "Do NOT continue the L2 experiment."
+            "The second target request did not hit L1 cache."
         )
-
-    print(
-        f"Host backup confirmed. "
-        f"host_used={host_used}"
-    )
 
     metrics_before_pressure = snapshot_metrics()
 
