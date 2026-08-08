@@ -78,16 +78,31 @@ ids = make_random_ids(
     SEED,
 )
 
+flush_cache()
+
+cold = generate(ids)
+
+print(
+    "Cold:",
+    repr(cold),
+)
+
 outputs = []
 
-for i in range(TRIALS):
-    flush_cache()
-
+for i in range(10):
     output = generate(ids)
 
     outputs.append(output)
 
-    print(f"[{i}] {repr(output)}")
+    print(
+        f"L1[{i}]:",
+        repr(output),
+    )
+
+print(
+    "Unique L1 outputs:",
+    len(set(outputs)),
+)
 
 
 reference = outputs[0]
