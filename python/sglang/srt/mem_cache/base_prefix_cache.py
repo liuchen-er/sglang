@@ -150,6 +150,8 @@ class InitLoadBackParams:
     host_hit_length: int
     mem_quota: Optional[int] = None
     req: Optional[Req] = None
+    prefill_batch_tokens: int = 0
+    running_batch_size: int = 0
 
 
 class MatchResult(NamedTuple):

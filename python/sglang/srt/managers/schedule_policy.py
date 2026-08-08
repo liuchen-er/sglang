@@ -1043,11 +1043,16 @@ class PrefillAdder:
                     return AddReqResult.NO_TOKEN
 
             if req.needs_host_load_back():
+                prefill_batch_tokens = sum(r.extend_range.length for r in self.can_run_list)
+                running_batch_size = self.running_batch.batch_size() if self.running_batch is not None else 0
+
                 new_indices, req.last_node = self.tree_cache.init_load_back(
                     InitLoadBackParams(
                         best_match_node=req.best_match_node,
                         host_hit_length=req.host_hit_length,
                         req=req,
+                        prefill_batch_tokens=prefill_batch_tokens,
+                        running_batch_size=running_batch_size,
                     )
                 )
                 req.prefix_indices = torch.cat([req.prefix_indices, new_indices])

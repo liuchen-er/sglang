@@ -1354,6 +1354,7 @@ class HiRadixCache(RadixCache):
         last_node = params.best_match_node
         mem_quota = params.mem_quota
         if last_node.evicted:
+            qload = len(self.cache_controller.load_queue)
             host_node_id = last_node.id
             host_hit_length = params.host_hit_length
             should_restore = self._should_restore_l2(params)
@@ -1365,13 +1366,13 @@ class HiRadixCache(RadixCache):
                 # 这次虽然发现了 Host Hit,但策略主动选择重新 Prefill。
                 # 必须清掉 Host Hit 标记，否则后续缓存统计会错误认为这些 Token 来自 L2。
                 if params.req is not None:
-                    logger.info("[HiCacheDecision] policy=%s action=recompute rid=%s prompt_len=%d host_hit_length=%d "
-                        "host_node_id=%d fallback_node_id=%d threshold=%d",
+                    logger.info(
+                        "[HiCacheDecision] policy=%s action=recompute rid=%s prompt_len=%d host_hit_length=%d "
+                        "host_node_id=%d fallback_node_id=%d threshold=%d prefill_batch_tokens=%d running_bs=%d qload=%d",
                         self.restore_policy, params.req.rid, len(params.req.full_untruncated_fill_ids),
-                        host_hit_length, host_node_id, last_node.id, self.restore_token_threshold)
-                    params.req.host_hit_length = 0
-                    params.req.best_match_node = last_node
-                    params.req.last_host_node = last_node
+                        host_hit_length, host_node_id, last_node.id, self.restore_token_threshold,
+                        params.prefill_batch_tokens, params.running_batch_size, qload,
+                    )
 
                 return (
                     self._empty_match_result.device_indices,
@@ -1381,9 +1382,10 @@ class HiRadixCache(RadixCache):
             if params.req is not None:
                 logger.info(
                     "[HiCacheDecision] policy=%s action=restore rid=%s prompt_len=%d host_hit_length=%d "
-                    "host_node_id=%d threshold=%d",
+                    "host_node_id=%d threshold=%d prefill_batch_tokens=%d running_bs=%d qload=%d",
                     self.restore_policy, params.req.rid, len(params.req.full_untruncated_fill_ids),
                     host_hit_length, host_node_id, self.restore_token_threshold,
+                    params.prefill_batch_tokens, params.running_batch_size, qload,
                 )
 
             loading_values = self.load_back(last_node, mem_quota)
