@@ -2080,7 +2080,7 @@ class ServerArgs:
     hicache_restore_safety_margin_ms: A[
         float,
         "Safety margin for cost-aware L2 restore decision in milliseconds."
-    ] = 1.0
+    ] = 2.0
 
 
     # -------------------------------------------------------------------------

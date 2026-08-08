@@ -1,7 +1,7 @@
 import json
 
 class HiCacheCostModel:
-    def __init__(self, profile_path: str, safety_margin_ms: float = 1.0):
+    def __init__(self, profile_path: str, safety_margin_ms: float = 2.0):
         with open(profile_path, encoding="utf-8") as f:
             self.profile = json.load(f)
 
@@ -69,5 +69,10 @@ class HiCacheCostModel:
         if restore_ms is None or recompute_ms is None:
             return True, restore_ms, recompute_ms
 
-        should_restore = restore_ms + self.safety_margin_ms < recompute_ms
+        # 只有当recompute优势足够大的时候，才选recompute
+        should_recompute = (
+                recompute_ms + self.safety_margin_ms < restore_ms
+        )
+        should_restore = not should_recompute
+        # should_restore = restore_ms + self.safety_margin_ms < recompute_ms
         return should_restore, restore_ms, recompute_ms
