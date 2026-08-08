@@ -15,7 +15,7 @@ from hicache_bench_common import (
 BASE_URL = os.getenv("BASE_URL", "http://127.0.0.1:30000")
 MODEL_PATH = os.environ["MODEL_PATH"]
 POLICY = os.getenv("POLICY", "always_restore")
-PREFIX_LENGTHS = [int(x) for x in os.getenv("PREFIX_LENGTHS", "512,1024,2048,4096,8192").split(",")]
+PREFIX_LENGTHS = [int(x) for x in os.getenv("PREFIX_LENGTHS", "512,1024,2048,4096,8192,16384").split(",")]
 SESSIONS_PER_LEN = int(os.getenv("SESSIONS_PER_LEN", "8"))
 TAIL_LEN = int(os.getenv("TAIL_LEN", "64"))
 OUTPUT_LEN = int(os.getenv("OUTPUT_LEN", "128"))
