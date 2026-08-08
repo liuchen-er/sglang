@@ -1,3 +1,4 @@
+# 对比restore\recompute输出一致性；真正执行测试，统计耗时
 import json
 import os
 import random

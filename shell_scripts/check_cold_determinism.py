@@ -1,3 +1,4 @@
+# 检查冷启动输出结果的一致性
 import os
 import random
 import requests

@@ -1,3 +1,4 @@
+# 用于初步对比recompute\restore耗时
 import json
 import os
 import random
