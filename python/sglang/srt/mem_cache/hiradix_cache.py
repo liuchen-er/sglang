@@ -1288,10 +1288,8 @@ class HiRadixCache(RadixCache):
             return params.host_hit_length >= self.restore_token_threshold, None, None
 
         if self.restore_policy == "cost_model":
-            qload = len(self.cache_controller.load_queue)
             should_restore, restore_ms, recompute_ms = self.cost_model.decide(
-                params.host_hit_length, params.prefill_batch_tokens, qload
-            )
+                params.host_hit_length, params.running_batch_size)
             return should_restore, restore_ms, recompute_ms
 
         raise ValueError(f"Unknown HiCache restore policy: {self.restore_policy}")
@@ -1386,7 +1384,6 @@ class HiRadixCache(RadixCache):
             qload = len(self.cache_controller.load_queue)
             host_node_id = last_node.id
             host_hit_length = params.host_hit_length
-            # should_restore = self._should_restore_l2(params)
             should_restore, estimated_restore_ms, estimated_recompute_ms = self._decide_restore_l2(params)
 
             logger.info(
