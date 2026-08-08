@@ -31,4 +31,10 @@ if [[ "$POLICY" == "token_threshold" ]]; then
     ARGS+=(--hicache-restore-token-threshold "$THRESHOLD")
 fi
 
+if [[ "$POLICY" == "cost_model" ]]; then
+    PROFILE="${HICACHE_COST_PROFILE:-/root/projects/sglang-qwen2-adaptive-prefill/hicache/profiles/hicache_cost_profile.json}"
+    MARGIN="${HICACHE_MARGIN_MS:-1.0}"
+    ARGS+=(--hicache-cost-profile "$PROFILE" --hicache-restore-safety-margin-ms "$MARGIN")
+fi
+
 python -m sglang.launch_server "${ARGS[@]}" 2>&1 | tee "$DATA/logs/server_${LOG_TAG}.log"

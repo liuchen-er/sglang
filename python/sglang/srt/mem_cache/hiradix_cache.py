@@ -216,6 +216,16 @@ class HiRadixCache(RadixCache):
             self.restore_token_threshold,
         )
 
+        self.cost_model = None
+        if self.restore_policy == "cost_model":
+            if not server_args.hicache_cost_profile:
+                raise ValueError("--hicache-cost-profile is required for cost_model policy")
+            from sglang.srt.mem_cache.hicache_cost_model import HiCacheCostModel
+            self.cost_model = HiCacheCostModel(
+                server_args.hicache_cost_profile,
+                server_args.hicache_restore_safety_margin_ms,
+            )
+
         # Detach storage backend automatically on process shutdown
         atexit.register(self.shutdown)
 
@@ -1245,27 +1255,46 @@ class HiRadixCache(RadixCache):
                 new_priority = self.eviction_strategy.get_priority(x.parent)
                 heapq.heappush(eviction_heap, (new_priority, x.parent))
 
-    def _should_restore_l2(
-            self,
-            params: InitLoadBackParams,
-    ) -> bool:
-        policy = self.restore_policy
+    # def _should_restore_l2(
+    #         self,
+    #         params: InitLoadBackParams,
+    # ) -> bool:
+    #     policy = self.restore_policy
+    #
+    #     if policy == "always_restore":
+    #         return True
+    #
+    #     if policy == "always_recompute":
+    #         return False
+    #
+    #     if policy == "token_threshold":
+    #         return (
+    #                 params.host_hit_length
+    #                 >= self.restore_token_threshold
+    #         )
+    #
+    #     raise ValueError(
+    #         f"Unknown HiCache restore policy: {policy}"
+    #     )
 
-        if policy == "always_restore":
-            return True
+    def _decide_restore_l2(self, params: InitLoadBackParams):
+        if self.restore_policy == "always_restore":
+            return True, None, None
 
-        if policy == "always_recompute":
-            return False
+        if self.restore_policy == "always_recompute":
+            return False, None, None
 
-        if policy == "token_threshold":
-            return (
-                    params.host_hit_length
-                    >= self.restore_token_threshold
+        if self.restore_policy == "token_threshold":
+            return params.host_hit_length >= self.restore_token_threshold, None, None
+
+        if self.restore_policy == "cost_model":
+            qload = len(self.cache_controller.load_queue)
+            should_restore, restore_ms, recompute_ms = self.cost_model.decide(
+                params.host_hit_length, params.prefill_batch_tokens, qload
             )
+            return should_restore, restore_ms, recompute_ms
 
-        raise ValueError(
-            f"Unknown HiCache restore policy: {policy}"
-        )
+        raise ValueError(f"Unknown HiCache restore policy: {self.restore_policy}")
 
     def load_back(
         self, node: TreeNode, mem_quota: Optional[int] = None
@@ -1357,7 +1386,15 @@ class HiRadixCache(RadixCache):
             qload = len(self.cache_controller.load_queue)
             host_node_id = last_node.id
             host_hit_length = params.host_hit_length
-            should_restore = self._should_restore_l2(params)
+            # should_restore = self._should_restore_l2(params)
+            should_restore, estimated_restore_ms, estimated_recompute_ms = self._decide_restore_l2(params)
+
+            logger.info(
+                "[HiCacheCost] rid=%s estimated_restore_ms=%s estimated_recompute_ms=%s",
+                params.req.rid,
+                f"{estimated_restore_ms:.3f}" if estimated_restore_ms is not None else "NA",
+                f"{estimated_recompute_ms:.3f}" if estimated_recompute_ms is not None else "NA",
+            )
 
             if not should_restore:
                 while last_node.evicted:

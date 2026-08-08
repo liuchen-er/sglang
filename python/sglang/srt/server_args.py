@@ -2061,6 +2061,7 @@ class ServerArgs:
                 "always_restore",
                 "always_recompute",
                 "token_threshold",
+                "cost_model"
             ],
         )
     ] = "always_restore"
@@ -2070,6 +2071,16 @@ class ServerArgs:
         "Minium number of L2-hit tokens required to restore "
         "host KV cache when hicache_restore_policy=token_threshold.",
     ] = 0
+
+    hicache_cost_profile: A[
+        Optional[str],
+        "Offline HiCache restore/recompute cost profile path."
+    ] = None
+
+    hicache_restore_safety_margin_ms: A[
+        float,
+        "Safety margin for cost-aware L2 restore decision in milliseconds."
+    ] = 1.0
 
 
     # -------------------------------------------------------------------------
