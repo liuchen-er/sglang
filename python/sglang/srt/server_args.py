@@ -2053,6 +2053,25 @@ class ServerArgs:
         "A dictionary in JSON string format, or a string starting with a leading '@' and a config file in JSON/YAML/TOML format, containing extra configuration for the storage backend.",
     ] = None
 
+    hicache_restore_policy: A[
+        str,
+        Arg(
+            help="Policy for restoring L2 host KV cache to GPU.",
+            choices=[
+                "always_restore",
+                "always_recompute",
+                "token_threshold",
+            ],
+        )
+    ] = "always_restore"
+
+    hicache_restore_token_threshold: A[
+        int,
+        "Minium number of L2-hit tokens required to restore "
+        "host KV cache when hicache_restore_policy=token_threshold.",
+    ] = 0
+
+
     # -------------------------------------------------------------------------
     # Hierarchical sparse attention
     # -------------------------------------------------------------------------

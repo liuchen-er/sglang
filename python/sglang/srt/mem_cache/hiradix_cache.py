@@ -205,6 +205,17 @@ class HiRadixCache(RadixCache):
         )
         self.load_back_threshold = 10
 
+        self.restore_policy = server_args.hicache_restore_policy
+        self.restore_token_threshold = (
+            server_args.hicache_restore_token_threshold
+        )
+
+        logger.info(
+            "HiCache L2 restore policy: %s, token_threshold=%d",
+            self.restore_policy,
+            self.restore_token_threshold,
+        )
+
         # Detach storage backend automatically on process shutdown
         atexit.register(self.shutdown)
 
@@ -1234,6 +1245,28 @@ class HiRadixCache(RadixCache):
                 new_priority = self.eviction_strategy.get_priority(x.parent)
                 heapq.heappush(eviction_heap, (new_priority, x.parent))
 
+    def _should_restore_l2(
+            self,
+            params: InitLoadBackParams,
+    ) -> bool:
+        policy = self.restore_policy
+
+        if policy == "always_restore":
+            return True
+
+        if policy == "always_recompute":
+            return False
+
+        if policy == "token_threshold":
+            return (
+                    params.host_hit_length
+                    >= self.restore_token_threshold
+            )
+
+        raise ValueError(
+            f"Unknown HiCache restore policy: {policy}"
+        )
+
     def load_back(
         self, node: TreeNode, mem_quota: Optional[int] = None
     ) -> Optional[torch.Tensor]:
@@ -1321,6 +1354,24 @@ class HiRadixCache(RadixCache):
         last_node = params.best_match_node
         mem_quota = params.mem_quota
         if last_node.evicted:
+            should_restore = self._should_restore_l2(params)
+
+            if not should_restore:
+                while last_node.evicted:
+                    last_node = last_node.parent
+
+                # 这次虽然发现了 Host Hit,但策略主动选择重新 Prefill。
+                # 必须清掉 Host Hit 标记，否则后续缓存统计会错误认为这些 Token 来自 L2。
+                if params.req is not None:
+                    params.req.host_hit_length = 0
+                    params.req.best_match_node = last_node
+                    params.req.last_host_node = last_node
+
+                return (
+                    self._empty_match_result.device_indices,
+                    last_node,
+                )
+
             loading_values = self.load_back(last_node, mem_quota)
             if loading_values is not None:
                 logger.debug(
