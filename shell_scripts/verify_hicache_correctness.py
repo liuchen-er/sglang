@@ -331,7 +331,6 @@ def run_one_trial(
     flush_cache()
     # --------------------------------------------------------
     # 1. Cold Prefill
-    #
     # 这是本轮的正确性 Reference。
     # --------------------------------------------------------
     cold = generate(
@@ -345,7 +344,6 @@ def run_one_trial(
         raise RuntimeError("Cold reference produced empty output.")
     # --------------------------------------------------------
     # 2. 等待 write-through：
-    #
     # GPU Target KV
     #       ↓
     # CPU Host L2
@@ -364,11 +362,8 @@ def run_one_trial(
         raise RuntimeError("No Host KV was observed after the Target Cold Prefill.")
     # --------------------------------------------------------
     # 3. 第二次相同 Target：
-    #
     # 此时应该主要走 L1 GPU Hit。
-    #
     # 同时验证：
-    #
     # output_L1 == output_Cold
     # --------------------------------------------------------
     l1 = generate(
@@ -394,13 +389,10 @@ def run_one_trial(
     metrics_before_pressure = snapshot_metrics()
     # --------------------------------------------------------
     # 5. 制造大量互不共享 Prefix 的请求
-    #
     # 目标：
-    #
     # GPU KV Pool 被填满
     #        ↓
     # Target 从 L1 被淘汰
-    #
     # 但 write-through 产生的 L2 副本仍保留。
     # --------------------------------------------------------
     for i in range(NUM_EVICTORS):
