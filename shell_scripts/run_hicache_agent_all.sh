@@ -19,12 +19,17 @@ REQUEST_RATE="${REQUEST_RATE:-inf}"
 THRESHOLD="${THRESHOLD:-960}"
 COST_PROFILE="${HICACHE_COST_PROFILE:-$DATA/profiles/hicache_cost_profile_v2.json}"
 MARGIN_MS="${HICACHE_MARGIN_MS:-1.0}"
-CONCURRENCIES=(4 16 32)
-POLICIES=(always_restore token_threshold cost_model)
+IFS=',' read -r -a CONCURRENCIES <<< "${CONCURRENCIES_CSV:-4,16,32}"
+IFS=',' read -r -a POLICIES <<< "${POLICIES_CSV:-always_restore,token_threshold,cost_model}"
+RUN_ANALYSIS="${RUN_ANALYSIS:-1}"
 
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 RUN_LOG="$DATA/logs/run_agent_all_${TIMESTAMP}.log"
 ARCHIVE="$DATA/archive/agent_b_${TIMESTAMP}"
+
+ARCHIVE_RESULTS="${ARCHIVE_RESULTS:-1}"
+
+RESULT_TAG="${RESULT_TAG:-}"
 
 SERVER_PID=""
 
@@ -166,7 +171,11 @@ start_server() {
 run_benchmark() {
     local policy="$1"
     local concurrency="$2"
-    local result="$DATA/results/agent_${policy}_c${concurrency}.jsonl"
+
+    local suffix=""
+    [[ -n "$RESULT_TAG" ]] && suffix="_${RESULT_TAG}"
+    local result="$DATA/results/agent_${policy}_c${concurrency}${suffix}.jsonl"
+
     local bench_log="$DATA/logs/bench_agent_${policy}_c${concurrency}.log"
 
     log "------------------------------------------------------------"
@@ -249,13 +258,17 @@ main() {
     log "MARGIN_MS=$MARGIN_MS"
 
     check_environment
-    archive_old_files
+    if [[ "$ARCHIVE_RESULTS" == "1" ]]; then
+      archive_old_files
+    fi
 
     for policy in "${POLICIES[@]}"; do
         run_policy "$policy"
     done
 
-    analyze_results
+    if [[ "$RUN_ANALYSIS" == "1" ]]; then
+      analyze_results
+    fi
 
     log "============================================================"
     log "ALL B EXPERIMENTS COMPLETED"
