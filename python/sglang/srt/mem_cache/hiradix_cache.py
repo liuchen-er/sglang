@@ -1357,12 +1357,20 @@ class HiRadixCache(RadixCache):
             should_restore = self._should_restore_l2(params)
 
             if not should_restore:
+                host_node_id = last_node.id
                 while last_node.evicted:
                     last_node = last_node.parent
 
                 # 这次虽然发现了 Host Hit,但策略主动选择重新 Prefill。
                 # 必须清掉 Host Hit 标记，否则后续缓存统计会错误认为这些 Token 来自 L2。
                 if params.req is not None:
+                    logger.info(
+                        "[HiCacheDecision] policy=%s action=recompute host_hit_length=%d host_node_id=%d fallback_node_id=%d",
+                        self.restore_policy,
+                        params.host_hit_length,
+                        host_node_id,
+                        last_node.id,
+                    )
                     params.req.host_hit_length = 0
                     params.req.best_match_node = last_node
                     params.req.last_host_node = last_node
