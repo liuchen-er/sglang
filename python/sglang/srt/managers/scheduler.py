@@ -2377,6 +2377,9 @@ class Scheduler(
                         self.tree_cache.cache_controller.get_prefetch_io_pending_tokens()
                     )
 
+                    waiting_queue_len = len(self.waiting_queue)
+                    running_bs = len(self.running_batch.reqs)
+
                     (
                         should_restore,
                         estimated_restore_ms,
@@ -2390,12 +2393,14 @@ class Scheduler(
                     logger.info(
                         "[HiCacheEarlyDecision] policy=cost_model "
                         "action=%s rid=%s storage_hit_length=%d "
-                        "io_pending_tokens=%d query_ms=%.3f "
-                        "estimated_restore_ms=%s estimated_recompute_ms=%s",
+                        "io_pending_tokens=%d waiting_queue_len=%d running_bs=%d "
+                        "query_ms=%.3f estimated_restore_ms=%s estimated_recompute_ms=%s",
                         "restore" if should_restore else "recompute",
                         req.rid,
                         storage_hit_length,
                         io_pending_tokens,
+                        waiting_queue_len,
+                        running_bs,
                         query_ms,
                         (
                             f"{estimated_restore_ms:.3f}"
