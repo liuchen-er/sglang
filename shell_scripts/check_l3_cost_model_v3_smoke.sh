@@ -3,59 +3,65 @@ set -euo pipefail
 
 LOG=/root/projects/sglang-qwen2-adaptive-prefill/hicache/logs/server_l3_cost_model_v3.log
 
+if [[ ! -f "$LOG" ]]; then
+    echo "[FAIL] Log file not found: $LOG"
+    exit 1
+fi
+
 echo "============================================================"
 echo "V3 SMOKE VALIDATION"
 echo "============================================================"
 
-P256_RECOMPUTE=$(
-    grep '\[HiCacheEarlyDecision\]' "$LOG" \
-    | grep 'policy=cost_model' \
-    | grep 'storage_hit_length=256' \
-    | grep 'action=recompute' \
-    | wc -l
-)
+P256_RECOMPUTE=$(awk '
+    /\[HiCacheEarlyDecision\]/ &&
+    /policy=cost_model/ &&
+    /storage_hit_length=256/ &&
+    /action=recompute/ {n++}
+    END {print n+0}
+' "$LOG")
 
-P256_IO=$(
-    grep '\[HiCachePrefetchIO\]' "$LOG" \
-    | grep 'completed_tokens=256' \
-    | wc -l
-)
+P256_IO=$(awk '
+    /\[HiCachePrefetchIO\]/ &&
+    /completed_tokens=256/ {n++}
+    END {print n+0}
+' "$LOG")
 
-P16384_RESTORE=$(
-    grep '\[HiCacheEarlyDecision\]' "$LOG" \
-    | grep 'policy=cost_model' \
-    | grep 'storage_hit_length=16384' \
-    | grep 'action=restore' \
-    | wc -l
-)
+P16384_RESTORE=$(awk '
+    /\[HiCacheEarlyDecision\]/ &&
+    /policy=cost_model/ &&
+    /storage_hit_length=16384/ &&
+    /action=restore/ {n++}
+    END {print n+0}
+' "$LOG")
 
-P16384_PRECOMPUTED=$(
-    grep '\[HiCachePrefetchQuery\]' "$LOG" \
-    | grep 'storage_hit_tokens=16384' \
-    | grep 'query_source=precomputed' \
-    | wc -l
-)
+P16384_PRECOMPUTED=$(awk '
+    /\[HiCachePrefetchQuery\]/ &&
+    /storage_hit_tokens=16384/ &&
+    /query_source=precomputed/ {n++}
+    END {print n+0}
+' "$LOG")
 
-P16384_WORKER=$(
-    grep '\[HiCachePrefetchQuery\]' "$LOG" \
-    | grep 'storage_hit_tokens=16384' \
-    | grep 'query_source=worker' \
-    | wc -l
-)
+P16384_WORKER=$(awk '
+    /\[HiCachePrefetchQuery\]/ &&
+    /storage_hit_tokens=16384/ &&
+    /query_source=worker/ {n++}
+    END {print n+0}
+' "$LOG")
 
-P16384_IO=$(
-    grep '\[HiCachePrefetchIO\]' "$LOG" \
-    | grep 'completed_tokens=16384' \
-    | wc -l
-)
+P16384_IO=$(awk '
+    /\[HiCachePrefetchIO\]/ &&
+    /completed_tokens=16384/ {n++}
+    END {print n+0}
+' "$LOG")
 
-P16384_LATE_RECOMPUTE=$(
-    grep '\[HiCacheDecision\]' "$LOG" \
-    | grep 'host_hit_length=16384' \
-    | grep 'action=recompute' \
-    | wc -l
-)
+P16384_LATE_RECOMPUTE=$(awk '
+    /\[HiCacheDecision\]/ &&
+    /host_hit_length=16384/ &&
+    /action=recompute/ {n++}
+    END {print n+0}
+' "$LOG")
 
+echo
 echo "prefix=256:"
 echo "  early recompute       = $P256_RECOMPUTE"
 echo "  payload io            = $P256_IO"
