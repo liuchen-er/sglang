@@ -12,26 +12,50 @@ import requests
 TIMEOUT = int(os.getenv("HICACHE_BENCH_TIMEOUT", "300"))
 
 
-def metric(base_url, name):
+def metric(base_url, name, default=None):
     r = requests.get(f"{base_url}/metrics", timeout=10)
     r.raise_for_status()
+
     p = re.compile(rf"^{re.escape(name)}(?:{{[^}}]*}})?\s+([-+0-9.eE]+)$")
     values = []
+
     for line in r.text.splitlines():
         m = p.match(line.strip())
         if m:
             values.append(float(m.group(1)))
-    if not values:
-        raise RuntimeError(f"Metric not found: {name}")
-    return sum(values)
+
+    if values:
+        return sum(values)
+
+    if default is not None:
+        return float(default)
+
+    raise RuntimeError(f"Required metric not found: {name}")
 
 
 def metrics(base_url):
     return {
-        "host_used": metric(base_url, "sglang:hicache_host_used_tokens"),
-        "host_total": metric(base_url, "sglang:hicache_host_total_tokens"),
-        "evicted": metric(base_url, "sglang:evicted_tokens_total"),
-        "load_back": metric(base_url, "sglang:load_back_tokens_total"),
+        # host_total is required because capacity checks depend on it.
+        "host_total": metric(
+            base_url,
+            "sglang:hicache_host_total_tokens",
+        ),
+        # These can legitimately be absent before the first corresponding event.
+        "host_used": metric(
+            base_url,
+            "sglang:hicache_host_used_tokens",
+            default=0.0,
+        ),
+        "evicted": metric(
+            base_url,
+            "sglang:evicted_tokens_total",
+            default=0.0,
+        ),
+        "load_back": metric(
+            base_url,
+            "sglang:load_back_tokens_total",
+            default=0.0,
+        ),
     }
 
 
