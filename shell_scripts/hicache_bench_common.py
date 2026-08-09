@@ -4,7 +4,7 @@ import math
 import random
 import re
 import time
-
+import os
 import aiohttp
 import requests
 
@@ -22,10 +22,23 @@ def metrics(base_url):
         "load_back": metric(base_url, "sglang:load_back_tokens_total"),
     }
 
-def flush(base_url):
-    r = requests.post(f"{base_url}/flush_cache", timeout=30)
+def clear_hicache_storage(base_url):
+    r = requests.post(
+        f"{base_url}/hicache/storage-backend/clear",
+        headers=_admin_headers(),
+        timeout=30,
+    )
     r.raise_for_status()
-    time.sleep(0.5)
+    return r
+
+def _admin_headers():
+    key = os.getenv("ADMIN_API_KEY")
+    return {"Authorization": f"Bearer {key}"} if key else {}
+
+def flush(base_url):
+    r = requests.post(f"{base_url}/flush_cache", headers=_admin_headers(), timeout=30)
+    r.raise_for_status()
+    return r
 
 def random_ids(n, seed, vocab_size):
     rng = random.Random(seed)

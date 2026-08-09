@@ -9,8 +9,9 @@ from transformers import AutoConfig, AutoTokenizer
 
 from hicache_bench_common import (
     fit_text_ids, flush, force_eviction, metric, metrics, refresh_metrics,
-    run_requests, runtime_warmup, sync_generate, write_jsonl,
+    run_requests, runtime_warmup, sync_generate, write_jsonl,clear_hicache_storage
 )
+
 
 BASE_URL = os.getenv("BASE_URL", "http://127.0.0.1:30000")
 MODEL_PATH = os.environ["MODEL_PATH"]
@@ -30,6 +31,7 @@ RESULT_FILE = Path(os.getenv(
     "RESULT_FILE",
     f"/root/projects/sglang-qwen2-adaptive-prefill/hicache/results/agent_{POLICY}_c{MAX_CONCURRENCY}.jsonl",
 ))
+CLEAR_L3 = os.getenv("CLEAR_L3", "0") == "1"
 
 config = AutoConfig.from_pretrained(MODEL_PATH, trust_remote_code=True)
 tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH, trust_remote_code=True)
@@ -74,6 +76,8 @@ def check_host_capacity(prefix_len):
 
 async def run_case(prefix_len, trial):
     flush(BASE_URL)
+    if CLEAR_L3:
+        clear_hicache_storage(BASE_URL)
     check_host_capacity(prefix_len)
 
     targets = []
