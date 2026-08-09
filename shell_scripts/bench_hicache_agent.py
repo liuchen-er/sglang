@@ -39,11 +39,7 @@ OUTPUT_LEN = int(os.getenv("OUTPUT_LEN", "128"))
 MAX_CONCURRENCY = int(os.getenv("MAX_CONCURRENCY", "16"))
 
 REQUEST_RATE_RAW = os.getenv("REQUEST_RATE", "inf")
-REQUEST_RATE = (
-    float("inf")
-    if REQUEST_RATE_RAW == "inf"
-    else float(REQUEST_RATE_RAW)
-)
+REQUEST_RATE = float("inf") if REQUEST_RATE_RAW == "inf" else float(REQUEST_RATE_RAW)
 
 TRIALS = int(os.getenv("TRIALS", "1"))
 EVICTOR_LEN = int(os.getenv("EVICTOR_LEN", "29000"))
@@ -200,11 +196,7 @@ def validate_cache_tier(rows, prefix_len):
                 )
 
         elif TARGET_CACHE_TIER == "L3":
-            if (
-                d["device"] != 0
-                or d["host"] != 0
-                or d["storage"] < prefix_len
-            ):
+            if d["device"] != 0 or d["host"] != 0 or d["storage"] < prefix_len:
                 raise RuntimeError(
                     f"L3-hit validation failed: rid={row['rid']} "
                     f"device={d['device']} host={d['host']} "
@@ -252,8 +244,7 @@ async def run_case(prefix_len, trial):
         sync_generate(
             BASE_URL,
             prefix,
-            f"agent_warm_{POLICY}_c{MAX_CONCURRENCY}_"
-            f"t{trial}_s{sid}_p{prefix_len}",
+            f"agent_warm_{POLICY}_c{MAX_CONCURRENCY}_t{trial}_s{sid}_p{prefix_len}",
             1,
         )
 
@@ -386,24 +377,53 @@ async def run_case(prefix_len, trial):
     expected_storage_prefetch = prefix_len * SESSIONS_PER_LEN
 
     if TARGET_CACHE_TIER == "L3":
-        print(
-            f"[L3 Revisit] prefetched_delta={storage_prefetch_delta:.0f} "
-            f"expected={expected_storage_prefetch}"
-        )
-
-    if TARGET_CACHE_TIER == "L3" and POLICY == "always_restore":
-        if storage_prefetch_delta != expected_storage_prefetch:
-            raise RuntimeError(
-                f"Pure L3 restore validation failed: "
-                f"prefetched={storage_prefetch_delta:.0f}, "
-                f"expected={expected_storage_prefetch:.0f}, "
-                f"missing={expected_storage_prefetch - storage_prefetch_delta:.0f}"
+        if POLICY == "always_restore":
+            print(
+                f"[L3 Revisit] policy=restore "
+                f"prefetched_delta={storage_prefetch_delta:.0f} "
+                f"expected={expected_storage_prefetch}"
             )
 
-        print(
-            f"[L3 Restore PASS] prefetched={storage_prefetch_delta:.0f} "
-            f"expected={expected_storage_prefetch:.0f}"
-        )
+            if abs(storage_prefetch_delta - expected_storage_prefetch) > 1e-6:
+                raise RuntimeError(
+                    f"Pure L3 restore validation failed: "
+                    f"prefetched={storage_prefetch_delta:.0f}, "
+                    f"expected={expected_storage_prefetch:.0f}, "
+                    f"missing="
+                    f"{expected_storage_prefetch - storage_prefetch_delta:.0f}"
+                )
+
+            print(
+                f"[L3 Restore PASS] "
+                f"prefetched={storage_prefetch_delta:.0f} "
+                f"expected={expected_storage_prefetch:.0f}"
+            )
+
+        elif POLICY == "always_recompute":
+            print(
+                f"[L3 Revisit] policy=recompute "
+                f"prefetched_delta={storage_prefetch_delta:.0f} "
+                f"expected=0"
+            )
+
+            if abs(storage_prefetch_delta) > 1e-6:
+                raise RuntimeError(
+                    f"Pure L3 recompute validation failed: "
+                    f"prefetched={storage_prefetch_delta:.0f}, "
+                    f"expected=0"
+                )
+
+            print(
+                f"[L3 Recompute PASS] "
+                f"prefetched={storage_prefetch_delta:.0f} "
+                f"expected=0"
+            )
+
+        else:
+            print(
+                f"[L3 Revisit] policy={POLICY} "
+                f"prefetched_delta={storage_prefetch_delta:.0f}"
+            )
 
     if VALIDATE_CACHE_TIER:
         validate_cache_tier(rows, prefix_len)
@@ -469,9 +489,7 @@ async def main():
     requests.get(f"{BASE_URL}/health", timeout=10).raise_for_status()
 
     if TARGET_CACHE_TIER not in ("L2", "L3"):
-        raise ValueError(
-            f"TARGET_CACHE_TIER must be L2 or L3, got {TARGET_CACHE_TIER}"
-        )
+        raise ValueError(f"TARGET_CACHE_TIER must be L2 or L3, got {TARGET_CACHE_TIER}")
 
     if RESET_RESULT:
         RESULT_FILE.unlink(missing_ok=True)

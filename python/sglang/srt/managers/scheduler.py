@@ -2293,6 +2293,20 @@ class Scheduler(
                 )
                 new_input_tokens = req.full_untruncated_fill_ids[matched_len:match_end]
 
+                if self.tree_cache.restore_policy == "always_recompute":
+                    io_pending_tokens = (
+                        self.tree_cache.cache_controller.get_prefetch_io_pending_tokens()
+                    )
+                    logger.info(
+                        "[HiCacheEarlyDecision] policy=always_recompute "
+                        "action=skip_l3_prefetch rid=%s "
+                        "query_span_tokens=%d io_pending_tokens=%d",
+                        req.rid,
+                        len(new_input_tokens),
+                        io_pending_tokens,
+                    )
+                    return
+
                 prefix_keys = (
                     last_host_node.get_prefix_hash_values(last_host_node.parent)
                     if self.tree_cache.hicache_storage_pass_prefix_keys
