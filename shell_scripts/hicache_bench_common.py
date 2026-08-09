@@ -51,23 +51,47 @@ def _admin_headers():
     return {"Authorization": f"Bearer {key}"} if key else {}
 
 
-def _admin_post(base_url, path, timeout=30):
-    r = requests.post(f"{base_url}{path}", headers=_admin_headers(), timeout=timeout)
+def _admin_post(base_url, path, timeout=30, params=None):
+    r = requests.post(
+        f"{base_url}{path}",
+        headers=_admin_headers(),
+        params=params,
+        timeout=timeout,
+    )
+
     if r.status_code == 401:
         raise RuntimeError(
-            f"401 Unauthorized for {path}. Export the same ADMIN_API_KEY used by the server."
+            f"401 Unauthorized for {path}. "
+            "Export the same ADMIN_API_KEY used by the server."
         )
-    r.raise_for_status()
+
+    if not r.ok:
+        raise RuntimeError(
+            f"POST {path} failed: "
+            f"status={r.status_code}, "
+            f"response={r.text.strip()!r}"
+        )
+
     return r
 
 
-def flush(base_url):
-    return _admin_post(base_url, "/flush_cache")
+def flush(base_url, wait_timeout_s=30.0):
+    # SGLang /flush_cache supports a timeout query parameter.
+    # timeout > 0 lets the scheduler wait until it becomes fully idle.
+    return _admin_post(
+        base_url,
+        "/flush_cache",
+        timeout=max(30, int(wait_timeout_s) + 5),
+        params={"timeout": wait_timeout_s},
+    )
 
 
 def clear_hicache_storage(base_url):
-    return _admin_post(base_url, "/hicache/storage-backend/clear")
-
+    return _admin_post(
+        base_url,
+        "/hicache/storage-backend/clear",
+        timeout=60,
+    )
 
 def random_ids(n, seed, vocab_size):
     rng = random.Random(seed)
