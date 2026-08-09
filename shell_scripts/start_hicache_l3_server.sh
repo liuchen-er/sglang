@@ -22,7 +22,7 @@ ARGS=(
     --page-size 64
     --mem-fraction-static 0.65
     --enable-hierarchical-cache
-    --hicache-ratio 2
+    --hicache-size 20
     --hicache-io-backend kernel
     --hicache-mem-layout page_first
     --hicache-write-policy write_through
