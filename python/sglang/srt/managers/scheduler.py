@@ -2382,7 +2382,9 @@ class Scheduler(
                     io_pending_tokens = (
                         self.tree_cache.cache_controller.get_prefetch_io_pending_tokens()
                     )
-
+                    admission_pending_tokens = int(
+                        self.tree_cache.cache_controller.prefetch_tokens_occupied
+                    )
                     waiting_queue_len = len(self.waiting_queue)
                     running_bs = len(self.running_batch.reqs)
                     gpu_queue_beta, gpu_queue_penalty_ms = (
@@ -2406,7 +2408,8 @@ class Scheduler(
                     logger.info(
                         "[HiCacheEarlyDecision] policy=cost_model "
                         "action=%s rid=%s storage_hit_length=%d "
-                        "io_pending_tokens=%d waiting_queue_len=%d running_bs=%d "
+                        "io_pending_tokens=%d admission_pending_tokens=%d "
+                        "waiting_queue_len=%d running_bs=%d "
                         "gpu_queue_beta=%.3f gpu_queue_penalty_ms=%.3f "
                         "query_ms=%.3f "
                         "estimated_restore_ms=%s estimated_recompute_ms=%s",
@@ -2414,6 +2417,7 @@ class Scheduler(
                         req.rid,
                         storage_hit_length,
                         io_pending_tokens,
+                        admission_pending_tokens,
                         waiting_queue_len,
                         running_bs,
                         gpu_queue_beta,
