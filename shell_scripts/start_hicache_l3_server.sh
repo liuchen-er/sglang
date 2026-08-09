@@ -9,6 +9,7 @@ L3_PATH="${HICACHE_L3_PATH:-/root/autodl-tmp/hicache_l3}"
 POLICY="${1:-always_restore}"
 THRESHOLD="${2:-960}"
 LOG_TAG="${LOG_TAG:-l3_${POLICY}}"
+ADMIN_API_KEY="${ADMIN_API_KEY:-hicache-admin-local}"
 
 mkdir -p "$DATA/logs" "$L3_PATH"
 cd "$REPO"
@@ -17,6 +18,7 @@ ARGS=(
     --model-path "$MODEL_PATH"
     --host 127.0.0.1
     --port 30000
+    --admin-api-key "$ADMIN_API_KEY"
     --page-size 64
     --mem-fraction-static 0.65
     --enable-hierarchical-cache
