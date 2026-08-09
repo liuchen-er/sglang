@@ -51,6 +51,7 @@ TARGET_CACHE_TIER = os.getenv("TARGET_CACHE_TIER", "L2").upper()
 HOST_SAFETY_RATIO = float(os.getenv("HOST_SAFETY_RATIO", "0.94"))
 L3_OVERFLOW_RATIO = float(os.getenv("L3_OVERFLOW_RATIO", "1.03"))
 L3_BACKUP_WAIT_S = float(os.getenv("L3_BACKUP_WAIT_S", "2.0"))
+L3_PREP_MODE = os.getenv("L3_PREP_MODE", "flush").lower()
 
 CLEAR_L3 = (
     os.getenv(
@@ -131,6 +132,12 @@ def check_host_capacity(prefix_len):
         return
 
     if TARGET_CACHE_TIER == "L3":
+        if L3_PREP_MODE == "flush":
+            print(
+                f"[Capacity] tier=L3 prep=flush prefix={prefix_len} "
+                f"target={target_tokens} host_total={host_total}"
+            )
+            return
         # Targets are older than the metric probe and evictors.
         # Newer cache pressure itself must exceed Host L2 capacity
         # so all target prefixes can be pushed out of L2.
@@ -264,18 +271,37 @@ async def run_case(prefix_len, trial):
             f"Host KV is empty after warmup: prefix={prefix_len}, trial={trial}"
         )
 
-    print(f"[Evict] {NUM_EVICTORS} x {EVICTOR_LEN} tokens...")
-
-    prep_evicted = force_eviction(
-        BASE_URL,
-        VOCAB_SIZE,
-        EVICTOR_LEN,
-        NUM_EVICTORS,
-        7_000_000 + prefix_len * 100 + trial * NUM_EVICTORS,
-    )
-
-    if TARGET_CACHE_TIER == "L3":
+    if TARGET_CACHE_TIER == "L3" and L3_PREP_MODE == "flush":
+        print("[L3 Prep] flushing L1/L2 while preserving L3...")
+        flush(BASE_URL)
         time.sleep(0.5)
+        prep_evicted = 0.0
+
+    elif TARGET_CACHE_TIER == "L3" and L3_PREP_MODE == "pressure":
+        print(f"[Evict] {NUM_EVICTORS} x {EVICTOR_LEN} tokens...")
+        prep_evicted = force_eviction(
+            BASE_URL,
+            VOCAB_SIZE,
+            EVICTOR_LEN,
+            NUM_EVICTORS,
+            7_000_000 + prefix_len * 100 + trial * NUM_EVICTORS,
+        )
+        time.sleep(0.5)
+
+    elif TARGET_CACHE_TIER == "L2":
+        print(f"[Evict] {NUM_EVICTORS} x {EVICTOR_LEN} tokens...")
+        prep_evicted = force_eviction(
+            BASE_URL,
+            VOCAB_SIZE,
+            EVICTOR_LEN,
+            NUM_EVICTORS,
+            7_000_000 + prefix_len * 100 + trial * NUM_EVICTORS,
+        )
+
+    else:
+        raise ValueError(
+            f"Unknown L3_PREP_MODE={L3_PREP_MODE}; expected flush or pressure"
+        )
 
     before = metrics(BASE_URL)
     workload = f"agent_{TARGET_CACHE_TIER.lower()}_hit"
