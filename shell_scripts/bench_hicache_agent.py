@@ -328,6 +328,13 @@ async def run_case(prefix_len, trial):
         )
 
     before = metrics(BASE_URL)
+
+    storage_prefetch_before = metric(
+        BASE_URL,
+        "sglang:prefetched_tokens_total",
+        default=0.0,
+    )
+
     workload = f"agent_{TARGET_CACHE_TIER.lower()}_hit"
 
     specs = []
@@ -367,10 +374,25 @@ async def run_case(prefix_len, trial):
 
     duration = time.perf_counter() - start
 
-    # Validate actual cache source before interpreting latency.
+    time.sleep(0.3)
+
+    storage_prefetch_after = metric(
+        BASE_URL,
+        "sglang:prefetched_tokens_total",
+        default=0.0,
+    )
+
+    storage_prefetch_delta = storage_prefetch_after - storage_prefetch_before
+    expected_storage_prefetch = prefix_len * SESSIONS_PER_LEN
+
+    if TARGET_CACHE_TIER == "L3":
+        print(
+            f"[L3 Revisit] prefetched_delta={storage_prefetch_delta:.0f} "
+            f"expected={expected_storage_prefetch}"
+        )
+
     validate_cache_tier(rows, prefix_len)
 
-    time.sleep(0.3)
     after = metrics(BASE_URL)
 
     load_back_delta = after["load_back"] - before["load_back"]
@@ -407,6 +429,8 @@ async def run_case(prefix_len, trial):
         "prep_evicted_delta": prep_evicted,
         "measurement_evicted_delta": measurement_evicted_delta,
         "load_back_delta": load_back_delta,
+        "storage_prefetch_delta": storage_prefetch_delta,
+        "expected_storage_prefetch": expected_storage_prefetch,
         "host_used_before_revisit": before["host_used"],
         "host_total": before["host_total"],
     }
