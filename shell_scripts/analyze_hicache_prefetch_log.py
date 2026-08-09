@@ -9,19 +9,7 @@ LOG = Path(
     "hicache/logs/l3_pressure_probe_restore_server.log"
 )
 
-PATTERN = re.compile(
-    r"\[HiCachePrefetchPressure\].*?"
-    r"request_id=(\S+)\s+"
-    r"request_tokens=(\d+)\s+"
-    r"occupied_at_enqueue=(\d+)\s+"
-    r"capacity=(\d+)\s+"
-    r"storage_pressure=([0-9.]+)\s+"
-    r"queue_depth_at_enqueue=(\d+)"
-)
-
-RID_PATTERN = re.compile(
-    r"_c(\d+).*?_p(\d+)"
-)
+MARKER = "[HiCachePrefetchPressure]"
 
 def percentile(values, q):
     xs = sorted(values)
@@ -40,43 +28,71 @@ if not LOG.exists():
     raise FileNotFoundError(LOG)
 
 groups = defaultdict(list)
+matched_lines = 0
+failed_lines = []
 
 with LOG.open(errors="replace") as f:
     for line in f:
-        m = PATTERN.search(line)
-        if not m:
+        if MARKER not in line:
             continue
 
-        rid = m.group(1)
-        request_tokens = int(m.group(2))
-        occupied = int(m.group(3))
-        capacity = int(m.group(4))
-        pressure = float(m.group(5))
-        queue_depth = int(m.group(6))
-        ongoing_prefetch = int(m.group(7))
+        matched_lines += 1
 
-        rm = RID_PATTERN.search(rid)
-        if not rm:
+        fields = dict(
+            re.findall(r"([A-Za-z_]+)=([^\s,]+)", line)
+        )
+
+        rid = fields.get("request_id")
+        if not rid:
+            failed_lines.append(line.rstrip())
             continue
 
-        concurrency = int(rm.group(1))
-        prefix = int(rm.group(2))
+        rid_match = re.search(r"_c(\d+).*?_p(\d+)", rid)
+        if not rid_match:
+            failed_lines.append(line.rstrip())
+            continue
+
+        required = [
+            "prefetch_tokens",
+            "occupied",
+            "capacity",
+            "storage_pressure",
+            "prefetch_queue_depth",
+            "ongoing_prefetch",
+        ]
+
+        if any(k not in fields for k in required):
+            failed_lines.append(line.rstrip())
+            continue
+
+        concurrency = int(rid_match.group(1))
+        prefix = int(rid_match.group(2))
 
         groups[(concurrency, prefix)].append(
             {
                 "rid": rid,
-                "request_tokens": request_tokens,
-                "occupied": occupied,
-                "capacity": capacity,
-                "pressure": pressure,
-                "queue_depth": queue_depth,
+                "prefetch_tokens": int(fields["prefetch_tokens"]),
+                "occupied": int(fields["occupied"]),
+                "capacity": int(fields["capacity"]),
+                "pressure": float(fields["storage_pressure"]),
+                "queue_depth": int(fields["prefetch_queue_depth"]),
+                "ongoing_prefetch": int(fields["ongoing_prefetch"]),
             }
         )
 
+print(f"[Parser] marker lines={matched_lines}")
+print(f"[Parser] parsed lines={sum(len(v) for v in groups.values())}")
+print(f"[Parser] failed lines={len(failed_lines)}")
+
+if failed_lines:
+    print("\nFirst failed lines:")
+    for line in failed_lines[:5]:
+        print(line)
+
 print()
-print("=" * 120)
+print("=" * 150)
 print("HICACHE STORAGE PRESSURE AT PREFETCH ENQUEUE")
-print("=" * 120)
+print("=" * 150)
 
 print(
     f"{'C':>4} "
@@ -89,17 +105,20 @@ print(
     f"{'Queue P50':>10} "
     f"{'Queue P95':>10} "
     f"{'Queue Max':>10} "
+    f"{'Ongoing P50':>12} "
+    f"{'Ongoing Max':>12} "
     f"{'Occ Max':>10} "
     f"{'Capacity':>10}"
 )
 
-print("-" * 145)
+print("-" * 170)
 
 for (c, prefix) in sorted(groups):
     rows = groups[(c, prefix)]
 
     pressures = [x["pressure"] for x in rows]
     queues = [x["queue_depth"] for x in rows]
+    ongoing = [x["ongoing_prefetch"] for x in rows]
     occupied = [x["occupied"] for x in rows]
     capacity = max(x["capacity"] for x in rows)
 
@@ -114,6 +133,8 @@ for (c, prefix) in sorted(groups):
         f"{median(queues):10.1f} "
         f"{percentile(queues, 0.95):10.1f} "
         f"{max(queues):10d} "
+        f"{median(ongoing):12.1f} "
+        f"{max(ongoing):12d} "
         f"{max(occupied):10d} "
         f"{capacity:10d}"
     )
