@@ -1089,10 +1089,12 @@ class HiCacheController:
                     continue
 
                 if operation.precomputed_storage_hit_count is not None:
+                    query_source = "precomputed"
                     hash_value = operation.precomputed_hash_values
                     storage_hit_count = operation.precomputed_storage_hit_count
                     query_ms = operation.precomputed_query_ms or 0.0
                 else:
+                    query_source = "worker"
                     hash_value, storage_hit_count = self._storage_hit_query(operation)
                     storage_hit_count_tensor = torch.tensor(
                         storage_hit_count, dtype=torch.int
@@ -1134,9 +1136,10 @@ class HiCacheController:
 
                     logger.info(
                         "[HiCachePrefetchQuery] request_id=%s "
-                        "query_ms=%.3f storage_hit_tokens=%d "
+                        "query_source=%s query_ms=%.3f storage_hit_tokens=%d "
                         "io_queue_depth=%d io_pending_tokens=%d",
                         operation.request_id,
+                        query_source,
                         query_ms,
                         storage_hit_count,
                         io_queue_depth,
