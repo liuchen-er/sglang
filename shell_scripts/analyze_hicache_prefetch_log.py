@@ -53,6 +53,7 @@ with LOG.open(errors="replace") as f:
         capacity = int(m.group(4))
         pressure = float(m.group(5))
         queue_depth = int(m.group(6))
+        ongoing_prefetch = int(m.group(7))
 
         rm = RID_PATTERN.search(rid)
         if not rm:
