@@ -33,6 +33,11 @@ RESULT_FILE = Path(os.getenv(
 ))
 CLEAR_L3 = os.getenv("CLEAR_L3", "0") == "1"
 
+TARGET_CACHE_TIER = os.getenv("TARGET_CACHE_TIER", "L2").upper()
+HOST_SAFETY_RATIO = float(os.getenv("HOST_SAFETY_RATIO", "0.94"))
+L3_OVERFLOW_RATIO = float(os.getenv("L3_OVERFLOW_RATIO", "1.03"))
+
+
 config = AutoConfig.from_pretrained(MODEL_PATH, trust_remote_code=True)
 tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH, trust_remote_code=True)
 VOCAB_SIZE = config.vocab_size
@@ -64,15 +69,44 @@ def build_session(prefix_len, sid, trial):
     return prefix, prefix + tail
 
 def check_host_capacity(prefix_len):
-    host_total = metric(BASE_URL, "sglang:hicache_host_total_tokens")
-    estimated = prefix_len * SESSIONS_PER_LEN + EVICTOR_LEN * NUM_EVICTORS
-    limit = host_total * HOST_SAFETY_RATIO
-    print(f"[Capacity] prefix={prefix_len}, estimated_host_pressure={estimated}, host_total={host_total:.0f}, safety_limit={limit:.0f}")
-    if estimated >= limit:
-        raise RuntimeError(
-            f"Estimated Host KV pressure is too high: {estimated} >= {limit:.0f}. "
-            "Reduce SESSIONS_PER_LEN / NUM_EVICTORS / EVICTOR_LEN."
+    m = metrics(BASE_URL)
+    host_total = int(m["host_total"])
+    target_tokens = prefix_len * SESSIONS_PER_LEN
+    evictor_tokens = EVICTOR_LEN * NUM_EVICTORS
+    estimated = target_tokens + evictor_tokens
+
+    if TARGET_CACHE_TIER == "L2":
+        safety_limit = int(host_total * HOST_SAFETY_RATIO)
+        print(
+            f"[Capacity] tier=L2 prefix={prefix_len}, "
+            f"estimated_host_pressure={estimated}, host_total={host_total}, "
+            f"safety_limit={safety_limit}"
         )
+        if estimated >= safety_limit:
+            raise RuntimeError(
+                f"Estimated Host KV pressure is too high for L2-hit workload: "
+                f"{estimated} >= {safety_limit}. "
+                f"Reduce SESSIONS_PER_LEN / NUM_EVICTORS / EVICTOR_LEN."
+            )
+        return
+
+    if TARGET_CACHE_TIER == "L3":
+        required = int(host_total * L3_OVERFLOW_RATIO)
+        print(
+            f"[Capacity] tier=L3 prefix={prefix_len}, "
+            f"target={target_tokens}, evictor={evictor_tokens}, "
+            f"estimated_host_pressure={estimated}, host_total={host_total}, "
+            f"required_overflow={required}"
+        )
+        if estimated <= required:
+            raise RuntimeError(
+                f"Host pressure is too low for L3-hit workload: "
+                f"{estimated} <= {required}. "
+                f"Increase NUM_EVICTORS / EVICTOR_LEN."
+            )
+        return
+
+    raise ValueError(f"Unknown TARGET_CACHE_TIER={TARGET_CACHE_TIER}, expected L2 or L3")
 
 async def run_case(prefix_len, trial):
     flush(BASE_URL)
