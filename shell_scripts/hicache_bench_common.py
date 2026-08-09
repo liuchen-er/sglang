@@ -1,49 +1,71 @@
 import asyncio
 import json
 import math
+import os
 import random
 import re
 import time
-import os
+
 import aiohttp
 import requests
 
-TIMEOUT = 300
+TIMEOUT = int(os.getenv("HICACHE_BENCH_TIMEOUT", "300"))
+
 
 def metric(base_url, name):
-    text = requests.get(f"{base_url}/metrics", timeout=10).text
-    p = re.compile(rf"^{re.escape(name)}(?:\{{[^}}]*\}})?\s+([-+0-9.eE]+)$")
-    return sum(float(m.group(1)) for line in text.splitlines() if (m := p.match(line.strip())))
+    r = requests.get(f"{base_url}/metrics", timeout=10)
+    r.raise_for_status()
+    p = re.compile(rf"^{re.escape(name)}(?:{{[^}}]*}})?\s+([-+0-9.eE]+)$")
+    values = []
+    for line in r.text.splitlines():
+        m = p.match(line.strip())
+        if m:
+            values.append(float(m.group(1)))
+    if not values:
+        raise RuntimeError(f"Metric not found: {name}")
+    return sum(values)
+
 
 def metrics(base_url):
     return {
         "host_used": metric(base_url, "sglang:hicache_host_used_tokens"),
+        "host_total": metric(base_url, "sglang:hicache_host_total_tokens"),
         "evicted": metric(base_url, "sglang:evicted_tokens_total"),
         "load_back": metric(base_url, "sglang:load_back_tokens_total"),
     }
 
-def clear_hicache_storage(base_url):
-    r = requests.post(
-        f"{base_url}/hicache/storage-backend/clear",
-        headers=_admin_headers(),
-        timeout=30,
-    )
-    r.raise_for_status()
-    return r
 
 def _admin_headers():
     key = os.getenv("ADMIN_API_KEY")
     return {"Authorization": f"Bearer {key}"} if key else {}
 
-def flush(base_url):
-    r = requests.post(f"{base_url}/flush_cache", headers=_admin_headers(), timeout=30)
+
+def _admin_post(base_url, path, timeout=30):
+    r = requests.post(f"{base_url}{path}", headers=_admin_headers(), timeout=timeout)
+    if r.status_code == 401:
+        raise RuntimeError(
+            f"401 Unauthorized for {path}. If the server was started with "
+            f"--admin-api-key, export the same ADMIN_API_KEY before running."
+        )
     r.raise_for_status()
     return r
+
+
+def flush(base_url):
+    return _admin_post(base_url, "/flush_cache")
+
+
+def clear_hicache_storage(base_url):
+    return _admin_post(base_url, "/hicache/storage-backend/clear")
+
 
 def random_ids(n, seed, vocab_size):
     rng = random.Random(seed)
     upper = min(vocab_size - 1, 50000)
+    if upper <= 1000:
+        raise ValueError(f"vocab_size is too small: {vocab_size}")
     return [rng.randrange(1000, upper) for _ in range(n)]
+
 
 def fit_text_ids(tokenizer, header, body, n):
     h = tokenizer.encode(header, add_special_tokens=False)
@@ -55,13 +77,17 @@ def fit_text_ids(tokenizer, header, body, n):
         ids.extend(b)
     return ids[:n]
 
+
 def sync_generate(base_url, ids, rid, max_new_tokens=1):
     payload = {
         "rid": rid,
         "input_ids": ids,
         "sampling_params": {
-            "temperature": 0, "top_k": 1, "top_p": 1.0,
-            "ignore_eos": True, "max_new_tokens": max_new_tokens,
+            "temperature": 0,
+            "top_k": 1,
+            "top_p": 1.0,
+            "ignore_eos": True,
+            "max_new_tokens": max_new_tokens,
         },
         "stream": False,
     }
@@ -72,35 +98,59 @@ def sync_generate(base_url, ids, rid, max_new_tokens=1):
         body = body[0]
     return body
 
+
 def runtime_warmup(base_url, vocab_size):
-    sync_generate(base_url, random_ids(128, 991337, vocab_size), "runtime_warmup", 16)
+    sync_generate(
+        base_url,
+        random_ids(128, 991337, vocab_size),
+        "runtime_warmup",
+        16,
+    )
     flush(base_url)
 
+
 def refresh_metrics(base_url, vocab_size, seed):
-    sync_generate(base_url, random_ids(128, seed, vocab_size), f"metric_probe_{seed}", 1)
+    sync_generate(
+        base_url,
+        random_ids(128, seed, vocab_size),
+        f"metric_probe_{seed}",
+        1,
+    )
     time.sleep(0.3)
     return metrics(base_url)
+
 
 def force_eviction(base_url, vocab_size, evictor_len, num_evictors, seed):
     before = metrics(base_url)
     for i in range(num_evictors):
-        sync_generate(base_url, random_ids(evictor_len, seed + i, vocab_size), f"evict_{seed}_{i}", 1)
+        sync_generate(
+            base_url,
+            random_ids(evictor_len, seed + i, vocab_size),
+            f"evict_{seed}_{i}",
+            1,
+        )
+    time.sleep(0.3)
     after = metrics(base_url)
     delta = after["evicted"] - before["evicted"]
     if delta <= 0:
         raise RuntimeError("No GPU KV eviction observed.")
     return delta
 
+
 async def stream_generate(session, base_url, ids, rid, max_new_tokens, extra=None):
     payload = {
         "rid": rid,
         "input_ids": ids,
         "sampling_params": {
-            "temperature": 0, "top_k": 1, "top_p": 1.0,
-            "ignore_eos": True, "max_new_tokens": max_new_tokens,
+            "temperature": 0,
+            "top_k": 1,
+            "top_p": 1.0,
+            "ignore_eos": True,
+            "max_new_tokens": max_new_tokens,
         },
         "stream": True,
     }
+
     st = time.perf_counter()
     ttft = None
     most_recent = st
@@ -108,11 +158,13 @@ async def stream_generate(session, base_url, ids, rid, max_new_tokens, extra=Non
     output_len = 0
     cached_tokens = 0
     itls = []
-    generated_text = ""
+    cache_meta = {}
 
     async with session.post(f"{base_url}/generate", json=payload) as response:
         if response.status != 200:
-            raise RuntimeError(f"{rid}: HTTP {response.status}: {await response.text()}")
+            raise RuntimeError(
+                f"{rid}: HTTP {response.status}: {await response.text()}"
+            )
 
         async for raw in response.content:
             raw = raw.strip()
@@ -131,13 +183,18 @@ async def stream_generate(session, base_url, ids, rid, max_new_tokens, extra=Non
             data = json.loads(chunk)
             meta = data.get("meta_info") or {}
             cached_tokens = meta.get("cached_tokens", cached_tokens)
+
+            # Preserve cache/storage related metadata for later L3 diagnosis.
+            for k, v in meta.items():
+                lk = k.lower()
+                if "cache" in lk or "storage" in lk or "prefix" in lk:
+                    cache_meta[k] = v
+
             text = data.get("text", "")
             current_output_len = int(meta.get("completion_tokens", output_len))
 
             if text:
                 ts = time.perf_counter()
-                generated_text = text
-
                 if ttft is None:
                     ttft = ts - st
                 else:
@@ -165,9 +222,12 @@ async def stream_generate(session, base_url, ids, rid, max_new_tokens, extra=Non
         "tpot_ms": tpot * 1000,
         "itls_ms": [x * 1000 for x in itls],
     }
+    if cache_meta:
+        row["cache_meta"] = cache_meta
     if extra:
         row.update(extra)
     return row
+
 
 async def run_requests(specs, base_url, max_concurrency, request_rate, seed):
     timeout = aiohttp.ClientTimeout(total=6 * 60 * 60)
@@ -175,12 +235,20 @@ async def run_requests(specs, base_url, max_concurrency, request_rate, seed):
     sem = asyncio.Semaphore(max_concurrency)
     rng = random.Random(seed)
 
-    async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
+    async with aiohttp.ClientSession(
+        timeout=timeout,
+        connector=connector,
+    ) as session:
+
         async def one(spec):
             async with sem:
                 return await stream_generate(
-                    session, base_url, spec["ids"], spec["rid"],
-                    spec["max_new_tokens"], spec.get("extra"),
+                    session,
+                    base_url,
+                    spec["ids"],
+                    spec["rid"],
+                    spec["max_new_tokens"],
+                    spec.get("extra"),
                 )
 
         tasks = []
@@ -190,6 +258,7 @@ async def run_requests(specs, base_url, max_concurrency, request_rate, seed):
                 await asyncio.sleep(rng.expovariate(request_rate))
 
         return await asyncio.gather(*tasks)
+
 
 def write_jsonl(path, rows):
     path.parent.mkdir(parents=True, exist_ok=True)
