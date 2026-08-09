@@ -192,6 +192,11 @@ class PrefetchOperation(StorageOperation):
         # Profiling timestamps for L3 prefetch stages.
         self.query_done_time = None
         self.io_enqueue_time = None
+        # Optional metadata-query result produced by the scheduler.
+        # If present, the storage prefetch worker reuses it instead of querying L3 again.
+        self.precomputed_storage_hit_count: Optional[int] = None
+        self.precomputed_hash_values: Optional[List[str]] = None
+        self.precomputed_query_ms: Optional[float] = None
 
         super().__init__(host_indices, token_ids, last_hash, prefix_keys=prefix_keys)
 
@@ -889,6 +894,9 @@ class HiCacheController:
         new_input_tokens: List[int],
         last_hash: Optional[str] = None,
         prefix_keys: Optional[List[str]] = None,
+        precomputed_hash_values: Optional[List[str]] = None,
+        precomputed_storage_hit_count: Optional[int] = None,
+        precomputed_query_ms: Optional[float] = None,
     ) -> PrefetchOperation:
         """
         Prefetch KV caches from storage backend to host memory.
@@ -896,6 +904,11 @@ class HiCacheController:
         operation = PrefetchOperation(
             request_id, host_indices, new_input_tokens, last_hash, prefix_keys
         )
+
+        operation.precomputed_hash_values = precomputed_hash_values
+        operation.precomputed_storage_hit_count = precomputed_storage_hit_count
+        operation.precomputed_query_ms = precomputed_query_ms
+
         self.prefetch_queue.put(operation)
         return operation
 
@@ -1074,18 +1087,23 @@ class HiCacheController:
                 operation = self.prefetch_queue.get(block=True, timeout=1)
                 if operation is None:
                     continue
-                hash_value, storage_hit_count = self._storage_hit_query(operation)
-                storage_hit_count_tensor = torch.tensor(
-                    storage_hit_count, dtype=torch.int
-                )
 
-                operation.query_done_time = time.monotonic()
-                query_ms = (operation.query_done_time - operation.start_time) * 1000.0
+                if operation.precomputed_storage_hit_count is not None:
+                    hash_value = operation.precomputed_hash_values
+                    storage_hit_count = operation.precomputed_storage_hit_count
+                    query_ms = operation.precomputed_query_ms or 0.0
+                else:
+                    hash_value, storage_hit_count = self._storage_hit_query(operation)
+                    storage_hit_count_tensor = torch.tensor(
+                        storage_hit_count, dtype=torch.int
+                    )
+                    self._all_reduce_prefetch_groups(
+                        storage_hit_count_tensor, torch.distributed.ReduceOp.MIN,
+                    )
+                    storage_hit_count = storage_hit_count_tensor.item()
 
-                self._all_reduce_prefetch_groups(
-                    storage_hit_count_tensor, torch.distributed.ReduceOp.MIN
-                )
-                storage_hit_count = storage_hit_count_tensor.item()
+                    operation.query_done_time = time.monotonic()
+                    query_ms = (operation.query_done_time - operation.start_time) * 1000.0
 
                 if storage_hit_count < self.prefetch_threshold:
                     # not to prefetch if not enough benefits

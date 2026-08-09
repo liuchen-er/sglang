@@ -233,6 +233,12 @@ class HiRadixCache(RadixCache):
 
         super().__init__(params=params)
 
+        logger.info(
+            "HiCache controller initialized: controller=%s kv_cache=%s",
+            type(self.cache_controller).__name__,
+            type(self.kv_cache).__name__,
+        )
+
     def _all_reduce_attn_groups(self, tensor: torch.Tensor, op):
         reduced = False
         for group in (self.attn_cp_group, self.attn_tp_group):
@@ -1444,32 +1450,37 @@ class HiRadixCache(RadixCache):
             last_node,
         )
 
-    def query_storage_hit_length(
-        self,
-        last_host_node: TreeNode,
-        new_input_tokens: List[int],
-        last_hash: Optional[str] = None,
-        prefix_keys: Optional[List[str]] = None,
-    ) -> int:
+    def query_storage_hit(
+            self,
+            last_host_node: TreeNode,
+            new_input_tokens: List[int],
+            last_hash: Optional[str] = None,
+            prefix_keys: Optional[List[str]] = None,
+    ) -> Tuple[List[str], int, float]:
         if not self.enable_storage or self.cache_controller.prefetch_rate_limited():
-            return 0
+            return [], 0, 0.0
 
         prefetch_key = RadixKey(
             new_input_tokens,
             extra_key=last_host_node.key.extra_key,
             is_bigram=self.is_eagle,
         ).page_aligned(self.page_size)
+
         if len(prefetch_key) < self.prefetch_threshold:
-            return 0
+            return [], 0, 0.0
 
         prefetch_op_cls = (
             HybridPrefetchOperation
             if isinstance(self.cache_controller, HybridCacheController)
             else PrefetchOperation
         )
+
         extra_kwargs = {}
         if prefetch_op_cls is HybridPrefetchOperation:
-            extra_kwargs["pool_transfers"] = self._get_extra_pools().get("extra_pools")
+            extra_kwargs["pool_transfers"] = (
+                self._get_extra_pools().get("extra_pools")
+            )
+
         operation = prefetch_op_cls(
             "__storage_hit_query__",
             self.cache_controller.mem_pool_host.get_dummy_flat_data_page()[:0],
@@ -1478,15 +1489,47 @@ class HiRadixCache(RadixCache):
             prefix_keys,
             **extra_kwargs,
         )
-        hash_values, storage_hit_count = self.cache_controller._storage_hit_query(
-            operation
+
+        start = time.monotonic()
+
+        hash_values, storage_hit_count = (
+            self.cache_controller._storage_hit_query(operation)
         )
-        storage_hit_count_tensor = torch.tensor(storage_hit_count, dtype=torch.int)
+
+        storage_hit_count_tensor = torch.tensor(
+            storage_hit_count,
+            dtype=torch.int,
+        )
+
         self._all_reduce_attn_groups(
-            storage_hit_count_tensor, torch.distributed.ReduceOp.MIN
+            storage_hit_count_tensor,
+            torch.distributed.ReduceOp.MIN,
         )
+
         storage_hit_count = storage_hit_count_tensor.item()
-        storage_hit_count = storage_hit_count - (storage_hit_count % self.page_size)
+        storage_hit_count -= storage_hit_count % self.page_size
+
+        hash_values = hash_values[
+            : storage_hit_count // self.page_size
+        ]
+
+        query_ms = (time.monotonic() - start) * 1000.0
+
+        return hash_values, storage_hit_count, query_ms
+
+    def query_storage_hit_length(
+        self,
+        last_host_node: TreeNode,
+        new_input_tokens: List[int],
+        last_hash: Optional[str] = None,
+        prefix_keys: Optional[List[str]] = None,
+    ) -> int:
+        _, storage_hit_count, _ = self.query_storage_hit(
+            last_host_node,
+            new_input_tokens,
+            last_hash,
+            prefix_keys,
+        )
         return storage_hit_count
 
     def ready_to_load_host_cache(self) -> int:
@@ -1697,6 +1740,7 @@ class HiRadixCache(RadixCache):
         new_input_tokens: List[int],
         last_hash: Optional[str] = None,
         prefix_keys: Optional[List[str]] = None,
+        precomputed_query: Optional[Tuple[List[str], int, float]] = None,
     ):
         prefetch_key = RadixKey(
             new_input_tokens,
@@ -1706,6 +1750,27 @@ class HiRadixCache(RadixCache):
         # align the number of fetching tokens to the page size
         prefetch_key = prefetch_key.page_aligned(self.page_size)
         prefetch_length = len(prefetch_key)
+
+        precomputed_hash_values = None
+        precomputed_storage_hit_count = None
+        precomputed_query_ms = None
+
+        if precomputed_query is not None:
+            (
+                precomputed_hash_values,
+                precomputed_storage_hit_count,
+                precomputed_query_ms,
+            ) = precomputed_query
+
+            if precomputed_storage_hit_count < self.prefetch_threshold:
+                return
+
+            prefetch_length = min(
+                prefetch_length,
+                precomputed_storage_hit_count,
+            )
+            prefetch_key = prefetch_key[:prefetch_length]
+
         if (
             not self.enable_storage
             or prefetch_length < self.prefetch_threshold
@@ -1739,6 +1804,9 @@ class HiRadixCache(RadixCache):
             prefetch_key,
             last_hash,
             prefix_keys,
+            precomputed_hash_values=precomputed_hash_values,
+            precomputed_storage_hit_count=precomputed_storage_hit_count,
+            precomputed_query_ms=precomputed_query_ms,
             **self._get_extra_pools(),
         )
         self.ongoing_prefetch[req_id] = (
