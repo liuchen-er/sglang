@@ -97,7 +97,9 @@ ensure_port_free() {
     local code
 
     code=$(
-        curl -sS --max-time 1 \
+        curl -s \
+            --connect-timeout 1 \
+            --max-time 3 \
             -o /dev/null \
             -w '%{http_code}' \
             "$BASE_URL/health" \
@@ -113,10 +115,17 @@ ensure_port_free() {
 
 wait_server_ready() {
     local launcher_log="$1"
+    local start_time
+    local now
+    local elapsed
+    local http_code
+
+    start_time=$(date +%s)
 
     echo "[Server] waiting for /health ..."
+    echo "[Server] startup timeout=600s, curl timeout=5s"
 
-    for i in $(seq 1 300); do
+    while true; do
         if ! kill -0 "$SERVER_PID" 2>/dev/null; then
             echo "[ERROR] Server exited before becoming healthy."
             echo "===== launcher log tail ====="
@@ -124,26 +133,40 @@ wait_server_ready() {
             exit 1
         fi
 
-        HTTP_CODE=$(
-            curl -sS --max-time 1 \
+        now=$(date +%s)
+        elapsed=$((now - start_time))
+
+        if (( elapsed >= 600 )); then
+            echo "[ERROR] Server health check timed out after ${elapsed}s."
+            echo "===== launcher log tail ====="
+            tail -80 "$launcher_log" || true
+            exit 1
+        fi
+
+        http_code=$(
+            curl -s \
+                --connect-timeout 2 \
+                --max-time 5 \
                 -o /dev/null \
                 -w '%{http_code}' \
                 "$BASE_URL/health" \
                 2>/dev/null || true
         )
 
-        if [[ "$HTTP_CODE" == "200" ]]; then
-            echo "[Server] ready after ${i}s."
+        if [[ "$http_code" == "200" ]]; then
+            now=$(date +%s)
+            elapsed=$((now - start_time))
+            echo "[Server] ready after ${elapsed}s."
+            sleep 3
             return
         fi
 
-        sleep 1
-    done
+        if (( elapsed % 30 < 3 )); then
+            echo "[Server] still starting... elapsed=${elapsed}s http=${http_code:-none}"
+        fi
 
-    echo "[ERROR] Server health check timed out."
-    echo "===== launcher log tail ====="
-    tail -80 "$launcher_log" || true
-    exit 1
+        sleep 2
+    done
 }
 
 start_server() {
