@@ -2352,6 +2352,76 @@ class Scheduler(
                     )
                     return
 
+                if self.tree_cache.restore_policy == "cost_model":
+                    storage_query = self.tree_cache.query_storage_hit(
+                        last_host_node,
+                        new_input_tokens,
+                        last_hash,
+                        prefix_keys,
+                    )
+
+                    _, storage_hit_length, query_ms = storage_query
+
+                    if storage_hit_length < self.tree_cache.prefetch_threshold:
+                        logger.info(
+                            "[HiCacheEarlyDecision] policy=cost_model "
+                            "action=recompute rid=%s storage_hit_length=%d "
+                            "reason=insufficient_l3_hit query_ms=%.3f",
+                            req.rid,
+                            storage_hit_length,
+                            query_ms,
+                        )
+                        return
+
+                    io_pending_tokens = (
+                        self.tree_cache.cache_controller.get_prefetch_io_pending_tokens()
+                    )
+
+                    (
+                        should_restore,
+                        estimated_restore_ms,
+                        estimated_recompute_ms,
+                    ) = self.tree_cache.cost_model.decide_l3(
+                        storage_hit_length,
+                        io_pending_tokens,
+                        query_ms,
+                    )
+
+                    logger.info(
+                        "[HiCacheEarlyDecision] policy=cost_model "
+                        "action=%s rid=%s storage_hit_length=%d "
+                        "io_pending_tokens=%d query_ms=%.3f "
+                        "estimated_restore_ms=%s estimated_recompute_ms=%s",
+                        "restore" if should_restore else "recompute",
+                        req.rid,
+                        storage_hit_length,
+                        io_pending_tokens,
+                        query_ms,
+                        (
+                            f"{estimated_restore_ms:.3f}"
+                            if estimated_restore_ms is not None
+                            else "NA"
+                        ),
+                        (
+                            f"{estimated_recompute_ms:.3f}"
+                            if estimated_recompute_ms is not None
+                            else "NA"
+                        ),
+                    )
+
+                    if not should_restore:
+                        return
+
+                    self.tree_cache.prefetch_from_storage(
+                        req.rid,
+                        last_host_node,
+                        new_input_tokens,
+                        last_hash,
+                        prefix_keys,
+                        precomputed_query=storage_query,
+                    )
+                    return
+
                 self.tree_cache.prefetch_from_storage(
                     req.rid,
                     last_host_node,

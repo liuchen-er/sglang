@@ -1294,6 +1294,10 @@ class HiRadixCache(RadixCache):
             return params.host_hit_length >= self.restore_token_threshold, None, None
 
         if self.restore_policy == "cost_model":
+            # 如果当前请求已经按照 Early CostModel 的决定从 L3 把 KV 搬到了 Host，就不允许在 Host→GPU 阶段再反悔做 Recompute
+            if params.req is not None and params.req.storage_hit_length > 0:
+                return True, None, None
+
             should_restore, restore_ms, recompute_ms = self.cost_model.decide(
                 params.host_hit_length, params.running_batch_size)
             return should_restore, restore_ms, recompute_ms
@@ -1798,6 +1802,16 @@ class HiRadixCache(RadixCache):
                 last_host_node.release_host()
                 # no sufficient host memory for prefetch
                 return
+
+        if precomputed_storage_hit_count is not None:
+            precomputed_storage_hit_count = min(
+                precomputed_storage_hit_count,
+                prefetch_length,
+            )
+            precomputed_hash_values = precomputed_hash_values[
+                : precomputed_storage_hit_count // self.page_size
+            ]
+
         operation = self.cache_controller.prefetch(
             req_id,
             host_indices,
