@@ -391,7 +391,22 @@ async def run_case(prefix_len, trial):
             f"expected={expected_storage_prefetch}"
         )
 
-    validate_cache_tier(rows, prefix_len)
+    if TARGET_CACHE_TIER == "L3" and POLICY == "always_restore":
+        if storage_prefetch_delta != expected_storage_prefetch:
+            raise RuntimeError(
+                f"Pure L3 restore validation failed: "
+                f"prefetched={storage_prefetch_delta:.0f}, "
+                f"expected={expected_storage_prefetch:.0f}, "
+                f"missing={expected_storage_prefetch - storage_prefetch_delta:.0f}"
+            )
+
+        print(
+            f"[L3 Restore PASS] prefetched={storage_prefetch_delta:.0f} "
+            f"expected={expected_storage_prefetch:.0f}"
+        )
+
+    if VALIDATE_CACHE_TIER:
+        validate_cache_tier(rows, prefix_len)
 
     after = metrics(BASE_URL)
 
