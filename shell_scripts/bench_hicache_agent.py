@@ -37,7 +37,11 @@ OUTPUT_LEN = int(os.getenv("OUTPUT_LEN", "128"))
 MAX_CONCURRENCY = int(os.getenv("MAX_CONCURRENCY", "16"))
 
 REQUEST_RATE_RAW = os.getenv("REQUEST_RATE", "inf")
-REQUEST_RATE = float("inf") if REQUEST_RATE_RAW == "inf" else float(REQUEST_RATE_RAW)
+REQUEST_RATE = (
+    float("inf")
+    if REQUEST_RATE_RAW == "inf"
+    else float(REQUEST_RATE_RAW)
+)
 
 TRIALS = int(os.getenv("TRIALS", "1"))
 EVICTOR_LEN = int(os.getenv("EVICTOR_LEN", "29000"))
@@ -56,6 +60,7 @@ CLEAR_L3 = (
     == "1"
 )
 
+VALIDATE_CACHE_TIER = os.getenv("VALIDATE_CACHE_TIER", "1") == "1"
 RESET_RESULT = os.getenv("RESET_RESULT", "1") == "1"
 METRIC_PROBE_TOKENS = 128
 
@@ -67,14 +72,8 @@ RESULT_FILE = Path(
     )
 )
 
-config = AutoConfig.from_pretrained(
-    MODEL_PATH,
-    trust_remote_code=True,
-)
-tokenizer = AutoTokenizer.from_pretrained(
-    MODEL_PATH,
-    trust_remote_code=True,
-)
+config = AutoConfig.from_pretrained(MODEL_PATH, trust_remote_code=True)
+tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH, trust_remote_code=True)
 VOCAB_SIZE = config.vocab_size
 
 CONTEXT_BODY = (
@@ -97,20 +96,17 @@ def build_session(prefix_len, sid, trial):
         CONTEXT_BODY,
         prefix_len,
     )
-
     tail = fit_text_ids(
         tokenizer,
         f"Round two request for session {trial}-{sid}. ",
         TAIL_BODY,
         TAIL_LEN,
     )
-
     return prefix, prefix + tail
 
 
 def check_host_capacity(prefix_len):
     m = metrics(BASE_URL)
-
     host_total = int(m["host_total"])
     target_tokens = prefix_len * SESSIONS_PER_LEN
     evictor_tokens = EVICTOR_LEN * NUM_EVICTORS
@@ -120,12 +116,9 @@ def check_host_capacity(prefix_len):
         safety_limit = int(host_total * HOST_SAFETY_RATIO)
 
         print(
-            f"[Capacity] tier=L2 prefix={prefix_len} "
-            f"target={target_tokens} "
-            f"probe={METRIC_PROBE_TOKENS} "
-            f"evictor={evictor_tokens} "
-            f"estimated={estimated} "
-            f"host_total={host_total} "
+            f"[Capacity] tier=L2 prefix={prefix_len} target={target_tokens} "
+            f"probe={METRIC_PROBE_TOKENS} evictor={evictor_tokens} "
+            f"estimated={estimated} host_total={host_total} "
             f"safety_limit={safety_limit}"
         )
 
@@ -135,40 +128,88 @@ def check_host_capacity(prefix_len):
                 f"{estimated} >= {safety_limit}. "
                 "Reduce SESSIONS_PER_LEN / NUM_EVICTORS / EVICTOR_LEN."
             )
-
         return
 
     if TARGET_CACHE_TIER == "L3":
-        # All target sessions are inserted BEFORE metric probe and evictors.
-        # To reliably evict every target from Host L2 under LRU, the amount
-        # of NEWER cache pressure after target warmup should itself exceed
-        # the Host L2 capacity.
+        # Targets are older than the metric probe and evictors.
+        # Newer cache pressure itself must exceed Host L2 capacity
+        # so all target prefixes can be pushed out of L2.
         newer_pressure = METRIC_PROBE_TOKENS + evictor_tokens
-
-        required_newer_pressure = int(host_total * L3_OVERFLOW_RATIO)
+        required = int(host_total * L3_OVERFLOW_RATIO)
 
         print(
-            f"[Capacity] tier=L3 prefix={prefix_len} "
-            f"target={target_tokens} "
-            f"probe={METRIC_PROBE_TOKENS} "
-            f"evictor={evictor_tokens} "
-            f"newer_pressure={newer_pressure} "
-            f"host_total={host_total} "
-            f"required_newer_pressure={required_newer_pressure}"
+            f"[Capacity] tier=L3 prefix={prefix_len} target={target_tokens} "
+            f"probe={METRIC_PROBE_TOKENS} evictor={evictor_tokens} "
+            f"newer_pressure={newer_pressure} host_total={host_total} "
+            f"required_newer_pressure={required}"
         )
 
-        if newer_pressure <= required_newer_pressure:
+        if newer_pressure <= required:
             raise RuntimeError(
-                "Post-warm pressure is too low to reliably evict all "
-                "warm targets from L2: "
-                f"{newer_pressure} <= {required_newer_pressure}. "
+                "Post-warm pressure is too low to reliably evict targets from L2: "
+                f"{newer_pressure} <= {required}. "
                 "Increase NUM_EVICTORS / EVICTOR_LEN."
             )
-
         return
 
     raise ValueError(
         f"Unknown TARGET_CACHE_TIER={TARGET_CACHE_TIER}; expected L2 or L3."
+    )
+
+
+def _cache_details(row):
+    meta = row.get("cache_meta") or {}
+    details = meta.get("cached_tokens_details") or {}
+    return {
+        "device": int(details.get("device", 0) or 0),
+        "host": int(details.get("host", 0) or 0),
+        "storage": int(details.get("storage", 0) or 0),
+        "storage_backend": details.get("storage_backend"),
+    }
+
+
+def validate_cache_tier(rows, prefix_len):
+    if not VALIDATE_CACHE_TIER:
+        return
+
+    # Strict tier validation is meaningful for the restore path.
+    # always_recompute intentionally rejects the available cache,
+    # so its final cache report cannot be interpreted as a restore source.
+    if POLICY == "always_recompute":
+        return
+
+    for row in rows:
+        d = _cache_details(row)
+
+        if TARGET_CACHE_TIER == "L2":
+            if d["device"] != 0 or d["host"] < prefix_len:
+                raise RuntimeError(
+                    f"L2-hit validation failed: rid={row['rid']} "
+                    f"device={d['device']} host={d['host']} "
+                    f"storage={d['storage']} expected_host>={prefix_len}"
+                )
+
+        elif TARGET_CACHE_TIER == "L3":
+            if (
+                d["device"] != 0
+                or d["host"] != 0
+                or d["storage"] < prefix_len
+            ):
+                raise RuntimeError(
+                    f"L3-hit validation failed: rid={row['rid']} "
+                    f"device={d['device']} host={d['host']} "
+                    f"storage={d['storage']} expected_storage>={prefix_len}"
+                )
+
+            if d["storage_backend"] != "HiCacheFile":
+                raise RuntimeError(
+                    f"Unexpected L3 backend: rid={row['rid']} "
+                    f"backend={d['storage_backend']}"
+                )
+
+    print(
+        f"[CacheTier PASS] tier={TARGET_CACHE_TIER} "
+        f"prefix={prefix_len} requests={len(rows)}"
     )
 
 
@@ -181,45 +222,30 @@ async def run_case(prefix_len, trial):
     check_host_capacity(prefix_len)
 
     targets = []
-
     for sid in range(SESSIONS_PER_LEN):
-        prefix, revisit = build_session(
-            prefix_len,
-            sid,
-            trial,
-        )
-
-        targets.append(
-            (
-                sid,
-                prefix,
-                revisit,
-            )
-        )
+        prefix, revisit = build_session(prefix_len, sid, trial)
+        targets.append((sid, prefix, revisit))
 
     print(
-        f"\n[Case] tier={TARGET_CACHE_TIER} "
-        f"policy={POLICY} "
-        f"c={MAX_CONCURRENCY} "
-        f"prefix={prefix_len} "
-        f"trial={trial}"
+        f"\n[Case] tier={TARGET_CACHE_TIER} policy={POLICY} "
+        f"c={MAX_CONCURRENCY} prefix={prefix_len} trial={trial}"
     )
-
     print(f"[Warm] {SESSIONS_PER_LEN} target prefixes...")
 
     for sid, prefix, _ in targets:
         sync_generate(
             BASE_URL,
             prefix,
-            (f"agent_warm_{POLICY}_c{MAX_CONCURRENCY}_t{trial}_s{sid}_p{prefix_len}"),
+            f"agent_warm_{POLICY}_c{MAX_CONCURRENCY}_"
+            f"t{trial}_s{sid}_p{prefix_len}",
             1,
         )
 
-    # Storage write-through is asynchronous in the HiCache path.
-    # Give the target KV time to reach L3 before creating L2 pressure.
     if TARGET_CACHE_TIER == "L3" and L3_BACKUP_WAIT_S > 0:
-        print(f"[L3] waiting {L3_BACKUP_WAIT_S:.1f}s for write-through backup...")
-
+        print(
+            f"[L3] waiting {L3_BACKUP_WAIT_S:.1f}s "
+            "for write-through backup..."
+        )
         time.sleep(L3_BACKUP_WAIT_S)
 
     host = refresh_metrics(
@@ -229,8 +255,7 @@ async def run_case(prefix_len, trial):
     )
 
     print(
-        f"[After warm] "
-        f"host_used={host['host_used']:.0f} "
+        f"[After warm] host_used={host['host_used']:.0f} "
         f"host_total={host['host_total']:.0f}"
     )
 
@@ -253,20 +278,16 @@ async def run_case(prefix_len, trial):
         time.sleep(0.5)
 
     before = metrics(BASE_URL)
-
     workload = f"agent_{TARGET_CACHE_TIER.lower()}_hit"
 
     specs = []
-
     for sid, _, revisit in targets:
         specs.append(
             {
                 "ids": revisit,
                 "rid": (
-                    f"agent_target_{POLICY}_"
-                    f"c{MAX_CONCURRENCY}_"
-                    f"t{trial}_s{sid}_"
-                    f"p{prefix_len}"
+                    f"agent_target_{POLICY}_c{MAX_CONCURRENCY}_"
+                    f"t{trial}_s{sid}_p{prefix_len}"
                 ),
                 "max_new_tokens": OUTPUT_LEN,
                 "extra": {
@@ -296,30 +317,27 @@ async def run_case(prefix_len, trial):
 
     duration = time.perf_counter() - start
 
-    time.sleep(0.3)
+    # Validate actual cache source before interpreting latency.
+    validate_cache_tier(rows, prefix_len)
 
+    time.sleep(0.3)
     after = metrics(BASE_URL)
 
     load_back_delta = after["load_back"] - before["load_back"]
-
     measurement_evicted_delta = after["evicted"] - before["evicted"]
 
     if POLICY == "always_restore" and load_back_delta <= 0:
         raise RuntimeError(
             "always_restore did not trigger restore/load-back: "
-            f"tier={TARGET_CACHE_TIER}, "
-            f"prefix={prefix_len}, "
-            f"trial={trial}, "
-            f"load_back_delta={load_back_delta}"
+            f"tier={TARGET_CACHE_TIER}, prefix={prefix_len}, "
+            f"trial={trial}, load_back_delta={load_back_delta}"
         )
 
     if POLICY == "always_recompute" and load_back_delta != 0:
         raise RuntimeError(
             "always_recompute unexpectedly triggered load-back: "
-            f"tier={TARGET_CACHE_TIER}, "
-            f"prefix={prefix_len}, "
-            f"trial={trial}, "
-            f"load_back_delta={load_back_delta}"
+            f"tier={TARGET_CACHE_TIER}, prefix={prefix_len}, "
+            f"trial={trial}, load_back_delta={load_back_delta}"
         )
 
     total_output = sum(x["output_tokens"] for x in rows)
@@ -334,8 +352,8 @@ async def run_case(prefix_len, trial):
         "max_concurrency": MAX_CONCURRENCY,
         "requests": len(rows),
         "duration_s": duration,
-        "request_throughput": (len(rows) / duration),
-        "output_throughput": (total_output / duration),
+        "request_throughput": len(rows) / duration,
+        "output_throughput": total_output / duration,
         "prep_evicted_delta": prep_evicted,
         "measurement_evicted_delta": measurement_evicted_delta,
         "load_back_delta": load_back_delta,
@@ -343,73 +361,46 @@ async def run_case(prefix_len, trial):
         "host_total": before["host_total"],
     }
 
-    write_jsonl(
-        RESULT_FILE,
-        rows + [summary],
-    )
+    write_jsonl(RESULT_FILE, rows + [summary])
 
     ttfts = sorted(x["ttft_ms"] for x in rows)
-
     p50 = ttfts[len(ttfts) // 2]
 
-    # L2 path has already been validated.
-    # For L3, load-back alone does not yet prove storage hit,
-    # so report MEASURED until L3 storage evidence is checked.
-    status = "PASS" if TARGET_CACHE_TIER == "L2" else "MEASURED"
-
     print(
-        f"[{status}] "
-        f"tier={TARGET_CACHE_TIER} "
-        f"prefix={prefix_len} "
-        f"trial={trial} "
-        f"req={len(rows)} "
+        f"[PASS] tier={TARGET_CACHE_TIER} prefix={prefix_len} "
+        f"trial={trial} req={len(rows)} "
         f"P50_TTFT={p50:.3f}ms "
         f"load_back={load_back_delta:.0f} "
         f"evicted={measurement_evicted_delta:.0f} "
-        f"out_tok/s="
-        f"{summary['output_throughput']:.1f}"
+        f"out_tok/s={summary['output_throughput']:.1f}"
     )
 
 
 async def main():
-    requests.get(
-        f"{BASE_URL}/health",
-        timeout=10,
-    ).raise_for_status()
+    requests.get(f"{BASE_URL}/health", timeout=10).raise_for_status()
 
-    if TARGET_CACHE_TIER not in (
-        "L2",
-        "L3",
-    ):
-        raise ValueError(f"TARGET_CACHE_TIER must be L2 or L3, got {TARGET_CACHE_TIER}")
+    if TARGET_CACHE_TIER not in ("L2", "L3"):
+        raise ValueError(
+            f"TARGET_CACHE_TIER must be L2 or L3, got {TARGET_CACHE_TIER}"
+        )
 
     if RESET_RESULT:
         RESULT_FILE.unlink(missing_ok=True)
 
-    runtime_warmup(
-        BASE_URL,
-        VOCAB_SIZE,
-    )
+    runtime_warmup(BASE_URL, VOCAB_SIZE)
 
     print(
-        f"POLICY={POLICY}, "
-        f"tier={TARGET_CACHE_TIER}, "
-        f"prefix={PREFIX_LENGTHS}, "
-        f"sessions/len={SESSIONS_PER_LEN}, "
-        f"concurrency={MAX_CONCURRENCY}, "
-        f"rate={REQUEST_RATE_RAW}, "
-        f"trials={TRIALS}, "
-        f"evictors={NUM_EVICTORS}x{EVICTOR_LEN}, "
-        f"clear_l3={CLEAR_L3}, "
+        f"POLICY={POLICY}, tier={TARGET_CACHE_TIER}, "
+        f"prefix={PREFIX_LENGTHS}, sessions/len={SESSIONS_PER_LEN}, "
+        f"concurrency={MAX_CONCURRENCY}, rate={REQUEST_RATE_RAW}, "
+        f"trials={TRIALS}, evictors={NUM_EVICTORS}x{EVICTOR_LEN}, "
+        f"clear_l3={CLEAR_L3}, validate_tier={VALIDATE_CACHE_TIER}, "
         f"result={RESULT_FILE}"
     )
 
     for trial in range(TRIALS):
         for prefix_len in PREFIX_LENGTHS:
-            await run_case(
-                prefix_len,
-                trial,
-            )
+            await run_case(prefix_len, trial)
 
 
 if __name__ == "__main__":

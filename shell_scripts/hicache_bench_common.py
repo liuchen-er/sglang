@@ -12,50 +12,37 @@ import requests
 TIMEOUT = int(os.getenv("HICACHE_BENCH_TIMEOUT", "300"))
 
 
-def metric(base_url, name, default=None):
+def _get_metrics_text(base_url):
     r = requests.get(f"{base_url}/metrics", timeout=10)
     r.raise_for_status()
+    return r.text
 
+
+def _metric_from_text(text, name, default=None):
     p = re.compile(rf"^{re.escape(name)}(?:{{[^}}]*}})?\s+([-+0-9.eE]+)$")
     values = []
-
-    for line in r.text.splitlines():
+    for line in text.splitlines():
         m = p.match(line.strip())
         if m:
             values.append(float(m.group(1)))
-
     if values:
         return sum(values)
-
     if default is not None:
         return float(default)
-
     raise RuntimeError(f"Required metric not found: {name}")
 
 
+def metric(base_url, name, default=None):
+    return _metric_from_text(_get_metrics_text(base_url), name, default)
+
+
 def metrics(base_url):
+    text = _get_metrics_text(base_url)
     return {
-        # host_total is required because capacity checks depend on it.
-        "host_total": metric(
-            base_url,
-            "sglang:hicache_host_total_tokens",
-        ),
-        # These can legitimately be absent before the first corresponding event.
-        "host_used": metric(
-            base_url,
-            "sglang:hicache_host_used_tokens",
-            default=0.0,
-        ),
-        "evicted": metric(
-            base_url,
-            "sglang:evicted_tokens_total",
-            default=0.0,
-        ),
-        "load_back": metric(
-            base_url,
-            "sglang:load_back_tokens_total",
-            default=0.0,
-        ),
+        "host_total": _metric_from_text(text, "sglang:hicache_host_total_tokens"),
+        "host_used": _metric_from_text(text, "sglang:hicache_host_used_tokens", 0.0),
+        "evicted": _metric_from_text(text, "sglang:evicted_tokens_total", 0.0),
+        "load_back": _metric_from_text(text, "sglang:load_back_tokens_total", 0.0),
     }
 
 
@@ -68,8 +55,7 @@ def _admin_post(base_url, path, timeout=30):
     r = requests.post(f"{base_url}{path}", headers=_admin_headers(), timeout=timeout)
     if r.status_code == 401:
         raise RuntimeError(
-            f"401 Unauthorized for {path}. If the server was started with "
-            f"--admin-api-key, export the same ADMIN_API_KEY before running."
+            f"401 Unauthorized for {path}. Export the same ADMIN_API_KEY used by the server."
         )
     r.raise_for_status()
     return r
@@ -124,22 +110,12 @@ def sync_generate(base_url, ids, rid, max_new_tokens=1):
 
 
 def runtime_warmup(base_url, vocab_size):
-    sync_generate(
-        base_url,
-        random_ids(128, 991337, vocab_size),
-        "runtime_warmup",
-        16,
-    )
+    sync_generate(base_url, random_ids(128, 991337, vocab_size), "runtime_warmup", 16)
     flush(base_url)
 
 
 def refresh_metrics(base_url, vocab_size, seed):
-    sync_generate(
-        base_url,
-        random_ids(128, seed, vocab_size),
-        f"metric_probe_{seed}",
-        1,
-    )
+    sync_generate(base_url, random_ids(128, seed, vocab_size), f"metric_probe_{seed}", 1)
     time.sleep(0.3)
     return metrics(base_url)
 
@@ -186,9 +162,7 @@ async def stream_generate(session, base_url, ids, rid, max_new_tokens, extra=Non
 
     async with session.post(f"{base_url}/generate", json=payload) as response:
         if response.status != 200:
-            raise RuntimeError(
-                f"{rid}: HTTP {response.status}: {await response.text()}"
-            )
+            raise RuntimeError(f"{rid}: HTTP {response.status}: {await response.text()}")
 
         async for raw in response.content:
             raw = raw.strip()
@@ -201,14 +175,13 @@ async def stream_generate(session, base_url, ids, rid, max_new_tokens, extra=Non
             elif chunk.startswith("data:"):
                 chunk = chunk[5:]
 
-            if chunk == "[DONE]":
+            if not chunk or chunk == "[DONE]":
                 continue
 
             data = json.loads(chunk)
             meta = data.get("meta_info") or {}
-            cached_tokens = meta.get("cached_tokens", cached_tokens)
+            cached_tokens = int(meta.get("cached_tokens", cached_tokens))
 
-            # Preserve cache/storage related metadata for later L3 diagnosis.
             for k, v in meta.items():
                 lk = k.lower()
                 if "cache" in lk or "storage" in lk or "prefix" in lk:
@@ -259,11 +232,7 @@ async def run_requests(specs, base_url, max_concurrency, request_rate, seed):
     sem = asyncio.Semaphore(max_concurrency)
     rng = random.Random(seed)
 
-    async with aiohttp.ClientSession(
-        timeout=timeout,
-        connector=connector,
-    ) as session:
-
+    async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
         async def one(spec):
             async with sem:
                 return await stream_generate(
