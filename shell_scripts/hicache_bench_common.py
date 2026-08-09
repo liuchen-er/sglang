@@ -36,6 +36,49 @@ def metric(base_url, name, default=None):
     return _metric_from_text(_get_metrics_text(base_url), name, default)
 
 
+def wait_metric_delta(
+    base_url,
+    name,
+    before,
+    expected_delta,
+    timeout_s=180.0,
+    poll_s=0.5,
+):
+    start = time.monotonic()
+    last_print = start
+
+    while True:
+        current = metric(base_url, name, default=0.0)
+        delta = current - before
+
+        if delta >= expected_delta:
+            elapsed = time.monotonic() - start
+            print(
+                f"[MetricBarrier] {name} ready: "
+                f"delta={delta:.0f} expected={expected_delta:.0f} "
+                f"elapsed={elapsed:.2f}s"
+            )
+            return current
+
+        now = time.monotonic()
+        if now - last_print >= 5.0:
+            print(
+                f"[MetricBarrier] waiting {name}: "
+                f"delta={delta:.0f}/{expected_delta:.0f} "
+                f"elapsed={now - start:.1f}s"
+            )
+            last_print = now
+
+        if now - start >= timeout_s:
+            raise RuntimeError(
+                f"Timeout waiting for {name}: "
+                f"delta={delta:.0f}, expected={expected_delta:.0f}, "
+                f"timeout={timeout_s}s"
+            )
+
+        time.sleep(poll_s)
+
+
 def metrics(base_url):
     text = _get_metrics_text(base_url)
     return {
@@ -43,6 +86,12 @@ def metrics(base_url):
         "host_used": _metric_from_text(text, "sglang:hicache_host_used_tokens", 0.0),
         "evicted": _metric_from_text(text, "sglang:evicted_tokens_total", 0.0),
         "load_back": _metric_from_text(text, "sglang:load_back_tokens_total", 0.0),
+        "storage_backuped": _metric_from_text(
+            text, "sglang:backuped_tokens_total", 0.0
+        ),
+        "storage_prefetched": _metric_from_text(
+            text, "sglang:prefetched_tokens_total", 0.0
+        ),
     }
 
 
@@ -67,9 +116,7 @@ def _admin_post(base_url, path, timeout=30, params=None):
 
     if not r.ok:
         raise RuntimeError(
-            f"POST {path} failed: "
-            f"status={r.status_code}, "
-            f"response={r.text.strip()!r}"
+            f"POST {path} failed: status={r.status_code}, response={r.text.strip()!r}"
         )
 
     return r
@@ -92,6 +139,7 @@ def clear_hicache_storage(base_url):
         "/hicache/storage-backend/clear",
         timeout=60,
     )
+
 
 def random_ids(n, seed, vocab_size):
     rng = random.Random(seed)
@@ -139,7 +187,9 @@ def runtime_warmup(base_url, vocab_size):
 
 
 def refresh_metrics(base_url, vocab_size, seed):
-    sync_generate(base_url, random_ids(128, seed, vocab_size), f"metric_probe_{seed}", 1)
+    sync_generate(
+        base_url, random_ids(128, seed, vocab_size), f"metric_probe_{seed}", 1
+    )
     time.sleep(0.3)
     return metrics(base_url)
 
@@ -186,7 +236,9 @@ async def stream_generate(session, base_url, ids, rid, max_new_tokens, extra=Non
 
     async with session.post(f"{base_url}/generate", json=payload) as response:
         if response.status != 200:
-            raise RuntimeError(f"{rid}: HTTP {response.status}: {await response.text()}")
+            raise RuntimeError(
+                f"{rid}: HTTP {response.status}: {await response.text()}"
+            )
 
         async for raw in response.content:
             raw = raw.strip()
@@ -257,6 +309,7 @@ async def run_requests(specs, base_url, max_concurrency, request_rate, seed):
     rng = random.Random(seed)
 
     async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
+
         async def one(spec):
             async with sem:
                 return await stream_generate(

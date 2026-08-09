@@ -11,11 +11,13 @@ from hicache_bench_common import (
     fit_text_ids,
     flush,
     force_eviction,
+    metric,
     metrics,
     refresh_metrics,
     run_requests,
     runtime_warmup,
     sync_generate,
+    wait_metric_delta,
     write_jsonl,
 )
 
@@ -50,7 +52,8 @@ NUM_EVICTORS = int(os.getenv("NUM_EVICTORS", "22"))
 TARGET_CACHE_TIER = os.getenv("TARGET_CACHE_TIER", "L2").upper()
 HOST_SAFETY_RATIO = float(os.getenv("HOST_SAFETY_RATIO", "0.94"))
 L3_OVERFLOW_RATIO = float(os.getenv("L3_OVERFLOW_RATIO", "1.03"))
-L3_BACKUP_WAIT_S = float(os.getenv("L3_BACKUP_WAIT_S", "2.0"))
+PAGE_SIZE = int(os.getenv("PAGE_SIZE", "64"))
+L3_BACKUP_TIMEOUT_S = float(os.getenv("L3_BACKUP_TIMEOUT_S", "180"))
 L3_PREP_MODE = os.getenv("L3_PREP_MODE", "flush").lower()
 
 CLEAR_L3 = (
@@ -228,6 +231,12 @@ async def run_case(prefix_len, trial):
 
     check_host_capacity(prefix_len)
 
+    storage_backup_before = metric(
+        BASE_URL,
+        "sglang:backuped_tokens_total",
+        default=0.0,
+    )
+
     targets = []
     for sid in range(SESSIONS_PER_LEN):
         prefix, revisit = build_session(prefix_len, sid, trial)
@@ -248,22 +257,37 @@ async def run_case(prefix_len, trial):
             1,
         )
 
-    if TARGET_CACHE_TIER == "L3" and L3_BACKUP_WAIT_S > 0:
-        print(
-            f"[L3] waiting {L3_BACKUP_WAIT_S:.1f}s "
-            "for write-through backup..."
-        )
-        time.sleep(L3_BACKUP_WAIT_S)
+    if TARGET_CACHE_TIER == "L3":
+        aligned_prefix_len = (prefix_len // PAGE_SIZE) * PAGE_SIZE
+        expected_backup_tokens = aligned_prefix_len * SESSIONS_PER_LEN
 
-    host = refresh_metrics(
-        BASE_URL,
-        VOCAB_SIZE,
-        6_000_000 + prefix_len * 10 + trial,
-    )
+        print(
+            f"[L3] waiting for storage backup completion: "
+            f"expected={expected_backup_tokens} tokens..."
+        )
+
+        wait_metric_delta(
+            BASE_URL,
+            "sglang:backuped_tokens_total",
+            storage_backup_before,
+            expected_backup_tokens,
+            timeout_s=L3_BACKUP_TIMEOUT_S,
+            poll_s=0.5,
+        )
+
+    if TARGET_CACHE_TIER == "L3" and L3_PREP_MODE == "flush":
+        host = metrics(BASE_URL)
+    else:
+        host = refresh_metrics(
+            BASE_URL,
+            VOCAB_SIZE,
+            6_000_000 + prefix_len * 10 + trial,
+        )
 
     print(
         f"[After warm] host_used={host['host_used']:.0f} "
-        f"host_total={host['host_total']:.0f}"
+        f"host_total={host['host_total']:.0f} "
+        f"storage_backuped={host['storage_backuped']:.0f}"
     )
 
     if host["host_used"] <= 0:
