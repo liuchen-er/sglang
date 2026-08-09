@@ -6,6 +6,8 @@ set -euo pipefail
 REPO=/root/projects/sglang-qwen2-adaptive-prefill/sglang
 DATA=/root/projects/sglang-qwen2-adaptive-prefill/hicache
 L3_PATH="${HICACHE_L3_PATH:-/root/autodl-tmp/hicache_l3}"
+# L3通过环境变量参数设置
+export SGLANG_HICACHE_FILE_BACKEND_STORAGE_DIR="$L3_PATH"
 POLICY="${1:-always_restore}"
 THRESHOLD="${2:-960}"
 LOG_TAG="${LOG_TAG:-l3_${POLICY}}"
@@ -27,7 +29,6 @@ ARGS=(
     --hicache-mem-layout page_first
     --hicache-write-policy write_through
     --hicache-storage-backend file
-    --file-storage-path "$L3_PATH"
     --hicache-storage-prefetch-policy wait_complete
     --enable-metrics
     --enable-cache-report
