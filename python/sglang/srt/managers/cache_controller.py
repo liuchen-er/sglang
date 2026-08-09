@@ -286,6 +286,12 @@ class HiCacheController:
         self.write_stream = device_module.Stream()
         self.load_stream = device_module.Stream()
 
+        # L3 prefetch I/O backlog profiling.
+        # Number of KV tokens that have passed the storage-hit query and are
+        # waiting for or currently undergoing storage -> host transfer.
+        self.prefetch_io_pending_tokens = 0
+        self.prefetch_io_backlog_lock = threading.Lock()
+
         # If a storage backend is provided at startup, treat it as an implicit attach,
         # so init/runtime share the same lifecycle semantics and code paths.
         if storage_backend is not None:
@@ -643,6 +649,8 @@ class HiCacheController:
             self.ack_backup_queue.queue.clear()
             self.host_mem_release_queue.queue.clear()
             self.prefetch_tokens_occupied = 0
+            with self.prefetch_io_backlog_lock:
+                self.prefetch_io_pending_tokens = 0
 
         self.storage_stop_event.clear()
 
@@ -870,6 +878,10 @@ class HiCacheController:
         self.draft_page_get_func = self._draft_page_get_generic
         self.draft_page_set_func = self._draft_page_set_generic
 
+    def get_prefetch_io_pending_tokens(self) -> int:
+        with self.prefetch_io_backlog_lock:
+            return int(self.prefetch_io_pending_tokens)
+
     def prefetch(
         self,
         request_id: str,
@@ -985,18 +997,26 @@ class HiCacheController:
 
                 self._page_transfer(operation)
 
+                with self.prefetch_io_backlog_lock:
+                    self.prefetch_io_pending_tokens -= operation.completed_tokens
+                    if self.prefetch_io_pending_tokens < 0:
+                        self.prefetch_io_pending_tokens = 0
+                    io_pending_tokens_after = self.prefetch_io_pending_tokens
+
                 io_end_time = time.monotonic()
                 transfer_ms = (io_end_time - io_start_time) * 1000.0
                 total_prefetch_ms = (io_end_time - operation.start_time) * 1000.0
                 logger.info(
                     "[HiCachePrefetchIO] request_id=%s "
                     "io_wait_ms=%.3f transfer_ms=%.3f "
-                    "total_prefetch_ms=%.3f completed_tokens=%d",
+                    "total_prefetch_ms=%.3f completed_tokens=%d "
+                    "io_pending_tokens_after=%d",
                     operation.request_id,
                     io_wait_ms,
                     transfer_ms,
                     total_prefetch_ms,
                     operation.completed_tokens,
+                    io_pending_tokens_after,
                 )
 
                 # operation terminated by controller, release pre-allocated memory
@@ -1090,15 +1110,21 @@ class HiCacheController:
                     operation.io_enqueue_time = time.monotonic()
                     io_queue_depth = self.prefetch_buffer.qsize()
 
+                    with self.prefetch_io_backlog_lock:
+                        self.prefetch_io_pending_tokens += storage_hit_count
+                        io_pending_tokens = self.prefetch_io_pending_tokens
+
                     logger.info(
                         "[HiCachePrefetchQuery] request_id=%s "
                         "query_ms=%.3f storage_hit_tokens=%d "
-                        "io_queue_depth=%d",
+                        "io_queue_depth=%d io_pending_tokens=%d",
                         operation.request_id,
                         query_ms,
                         storage_hit_count,
                         io_queue_depth,
+                        io_pending_tokens,
                     )
+
                     self.prefetch_buffer.put(operation)
 
             except Empty:

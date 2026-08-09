@@ -1384,6 +1384,11 @@ class HiRadixCache(RadixCache):
             qload = len(self.cache_controller.load_queue)
             host_node_id = last_node.id
             host_hit_length = params.host_hit_length
+            io_pending_tokens = (
+                self.cache_controller.get_prefetch_io_pending_tokens()
+                if self.enable_storage else 0
+            )
+
             should_restore, estimated_restore_ms, estimated_recompute_ms = self._decide_restore_l2(params)
 
             logger.info(
@@ -1402,10 +1407,11 @@ class HiRadixCache(RadixCache):
                 if params.req is not None:
                     logger.info(
                         "[HiCacheDecision] policy=%s action=recompute rid=%s prompt_len=%d host_hit_length=%d "
-                        "host_node_id=%d fallback_node_id=%d threshold=%d prefill_batch_tokens=%d running_bs=%d qload=%d",
+                        "host_node_id=%d fallback_node_id=%d threshold=%d prefill_batch_tokens=%d running_bs=%d qload=%d io_pending_tokens=%d ",
                         self.restore_policy, params.req.rid, len(params.req.full_untruncated_fill_ids),
                         host_hit_length, host_node_id, last_node.id, self.restore_token_threshold,
                         params.prefill_batch_tokens, params.running_batch_size, qload,
+                        io_pending_tokens,
                     )
 
                 return (
@@ -1416,10 +1422,11 @@ class HiRadixCache(RadixCache):
             if params.req is not None:
                 logger.info(
                     "[HiCacheDecision] policy=%s action=restore rid=%s prompt_len=%d host_hit_length=%d "
-                    "host_node_id=%d threshold=%d prefill_batch_tokens=%d running_bs=%d qload=%d",
+                    "host_node_id=%d threshold=%d prefill_batch_tokens=%d running_bs=%d qload=%d io_pending_tokens=%d ",
                     self.restore_policy, params.req.rid, len(params.req.full_untruncated_fill_ids),
                     host_hit_length, host_node_id, self.restore_token_threshold,
                     params.prefill_batch_tokens, params.running_batch_size, qload,
+                    io_pending_tokens,
                 )
 
             loading_values = self.load_back(last_node, mem_quota)
