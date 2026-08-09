@@ -189,6 +189,10 @@ class PrefetchOperation(StorageOperation):
         self._terminated_flag = False
         self.start_time = time.monotonic()
 
+        # Profiling timestamps for L3 prefetch stages.
+        self.query_done_time = None
+        self.io_enqueue_time = None
+
         super().__init__(host_indices, token_ids, last_hash, prefix_keys=prefix_keys)
 
     def increment(self, num_tokens: int):
@@ -972,7 +976,29 @@ class HiCacheController:
                 operation = self.prefetch_buffer.get(block=True, timeout=1)
                 if operation is None:
                     continue
+
+                io_start_time = time.monotonic()
+                if operation.io_enqueue_time is not None:
+                    io_wait_ms = (io_start_time - operation.io_enqueue_time) * 1000.0
+                else:
+                    io_wait_ms = 0.0
+
                 self._page_transfer(operation)
+
+                io_end_time = time.monotonic()
+                transfer_ms = (io_end_time - io_start_time) * 1000.0
+                total_prefetch_ms = (io_end_time - operation.start_time) * 1000.0
+                logger.info(
+                    "[HiCachePrefetchIO] request_id=%s "
+                    "io_wait_ms=%.3f transfer_ms=%.3f "
+                    "total_prefetch_ms=%.3f completed_tokens=%d",
+                    operation.request_id,
+                    io_wait_ms,
+                    transfer_ms,
+                    total_prefetch_ms,
+                    operation.completed_tokens,
+                )
+
                 # operation terminated by controller, release pre-allocated memory
                 self.append_host_mem_release(
                     operation.host_indices[operation.completed_tokens :]
@@ -1032,6 +1058,10 @@ class HiCacheController:
                 storage_hit_count_tensor = torch.tensor(
                     storage_hit_count, dtype=torch.int
                 )
+
+                operation.query_done_time = time.monotonic()
+                query_ms = (operation.query_done_time - operation.start_time) * 1000.0
+
                 self._all_reduce_prefetch_groups(
                     storage_hit_count_tensor, torch.distributed.ReduceOp.MIN
                 )
@@ -1055,6 +1085,19 @@ class HiCacheController:
                     operation.host_indices = operation.host_indices[:storage_hit_count]
                     logger.debug(
                         f"Prefetching {len(operation.hash_value)} pages for request {operation.request_id}."
+                    )
+
+                    operation.io_enqueue_time = time.monotonic()
+                    io_queue_depth = self.prefetch_buffer.qsize()
+
+                    logger.info(
+                        "[HiCachePrefetchQuery] request_id=%s "
+                        "query_ms=%.3f storage_hit_tokens=%d "
+                        "io_queue_depth=%d",
+                        operation.request_id,
+                        query_ms,
+                        storage_hit_count,
+                        io_queue_depth,
                     )
                     self.prefetch_buffer.put(operation)
 
