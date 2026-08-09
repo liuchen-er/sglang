@@ -2312,6 +2312,46 @@ class Scheduler(
                     if self.tree_cache.hicache_storage_pass_prefix_keys
                     else None
                 )
+
+                if self.tree_cache.restore_policy == "token_threshold":
+                    storage_query = self.tree_cache.query_storage_hit(
+                        last_host_node,
+                        new_input_tokens,
+                        last_hash,
+                        prefix_keys,
+                    )
+
+                    _, storage_hit_length, query_ms = storage_query
+
+                    should_restore = (
+                            storage_hit_length
+                            >= self.tree_cache.restore_token_threshold
+                    )
+
+                    logger.info(
+                        "[HiCacheEarlyDecision] policy=token_threshold "
+                        "action=%s rid=%s storage_hit_length=%d "
+                        "threshold=%d query_ms=%.3f",
+                        "restore" if should_restore else "recompute",
+                        req.rid,
+                        storage_hit_length,
+                        self.tree_cache.restore_token_threshold,
+                        query_ms,
+                    )
+
+                    if not should_restore:
+                        return
+
+                    self.tree_cache.prefetch_from_storage(
+                        req.rid,
+                        last_host_node,
+                        new_input_tokens,
+                        last_hash,
+                        prefix_keys,
+                        precomputed_query=storage_query,
+                    )
+                    return
+
                 self.tree_cache.prefetch_from_storage(
                     req.rid,
                     last_host_node,
