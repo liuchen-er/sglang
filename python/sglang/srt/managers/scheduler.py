@@ -2385,6 +2385,12 @@ class Scheduler(
 
                     waiting_queue_len = len(self.waiting_queue)
                     running_bs = len(self.running_batch.reqs)
+                    gpu_queue_beta, gpu_queue_penalty_ms = (
+                        self.tree_cache.cost_model.estimate_l3_gpu_queue_penalty(
+                            storage_hit_length,
+                            waiting_queue_len,
+                        )
+                    )
 
                     (
                         should_restore,
@@ -2394,19 +2400,24 @@ class Scheduler(
                         storage_hit_length,
                         io_pending_tokens,
                         query_ms,
+                        waiting_queue_len,
                     )
 
                     logger.info(
                         "[HiCacheEarlyDecision] policy=cost_model "
                         "action=%s rid=%s storage_hit_length=%d "
                         "io_pending_tokens=%d waiting_queue_len=%d running_bs=%d "
-                        "query_ms=%.3f estimated_restore_ms=%s estimated_recompute_ms=%s",
+                        "gpu_queue_beta=%.3f gpu_queue_penalty_ms=%.3f "
+                        "query_ms=%.3f "
+                        "estimated_restore_ms=%s estimated_recompute_ms=%s",
                         "restore" if should_restore else "recompute",
                         req.rid,
                         storage_hit_length,
                         io_pending_tokens,
                         waiting_queue_len,
                         running_bs,
+                        gpu_queue_beta,
+                        gpu_queue_penalty_ms,
                         query_ms,
                         (
                             f"{estimated_restore_ms:.3f}"

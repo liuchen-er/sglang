@@ -30,6 +30,8 @@ class HiCacheCostModel:
         self.l3_restore_curve = []
         self.l3_recompute_curve = []
         self.l3_io_backlog_ms_per_token = 0.0
+        self.l3_gpu_queue_curve = []
+        self.l3_gpu_queue_min_storage_hit = None
 
         if self.version == 3:
             l3 = self.profile.get("l3")
@@ -45,6 +47,13 @@ class HiCacheCostModel:
                 key=lambda x: x["storage_hit"],
             )
             self.l3_io_backlog_ms_per_token = float(l3["io_backlog_ms_per_token"])
+            gpu_queue = l3.get("gpu_queue")
+            if gpu_queue is not None:
+                self.l3_gpu_queue_min_storage_hit = int(gpu_queue["min_storage_hit"])
+                self.l3_gpu_queue_curve = sorted(
+                    gpu_queue["entries"],
+                    key=lambda x: x["storage_hit"],
+                )
 
     def _nearest_running_bs(self, running_bs: int) -> int:
         return min(self.running_bs_buckets, key=lambda x: abs(x - running_bs))
@@ -73,6 +82,29 @@ class HiCacheCostModel:
 
         return None
 
+    def estimate_l3_gpu_queue_penalty(
+        self,
+        storage_hit: int,
+        waiting_queue_len: int,
+    ):
+        if (
+            self.l3_gpu_queue_min_storage_hit is None
+            or storage_hit < self.l3_gpu_queue_min_storage_hit
+        ):
+            return 0.0, 0.0
+
+        beta = self._interp_l3_gpu_queue(
+            self.l3_gpu_queue_curve,
+            storage_hit,
+        )
+
+        if beta is None:
+            return 0.0, 0.0
+
+        penalty_ms = max(0, waiting_queue_len) * beta
+
+        return beta, penalty_ms
+
     @staticmethod
     def _interp_l3(curve, storage_hit):
         if not curve:
@@ -93,6 +125,34 @@ class HiCacheCostModel:
                 x0, x1 = left["storage_hit"], right["storage_hit"]
                 y0, y1 = left["latency_ms"], right["latency_ms"]
                 ratio = (storage_hit - x0) / (x1 - x0)
+                return y0 + ratio * (y1 - y0)
+
+        return None
+
+    @staticmethod
+    def _interp_l3_gpu_queue(curve, storage_hit):
+        if not curve:
+            return None
+
+        min_hit = curve[0]["storage_hit"]
+        max_hit = curve[-1]["storage_hit"]
+
+        if storage_hit < min_hit or storage_hit > max_hit:
+            return None
+
+        for point in curve:
+            if point["storage_hit"] == storage_hit:
+                return point["ms_per_waiting_req"]
+
+        for left, right in zip(curve, curve[1:]):
+            if left["storage_hit"] < storage_hit < right["storage_hit"]:
+                x0 = left["storage_hit"]
+                x1 = right["storage_hit"]
+                y0 = left["ms_per_waiting_req"]
+                y1 = right["ms_per_waiting_req"]
+
+                ratio = (storage_hit - x0) / (x1 - x0)
+
                 return y0 + ratio * (y1 - y0)
 
         return None
@@ -122,6 +182,7 @@ class HiCacheCostModel:
         storage_hit: int,
         io_pending_tokens: int,
         query_ms: float,
+        waiting_queue_len: int = 0,
     ):
         if self.version < 3:
             return None, None
@@ -138,14 +199,15 @@ class HiCacheCostModel:
         if restore_base_ms is None or recompute_base_ms is None:
             return None, None
 
-        backlog_ms = max(0, io_pending_tokens) * self.l3_io_backlog_ms_per_token
+        io_backlog_ms = max(0, io_pending_tokens) * self.l3_io_backlog_ms_per_token
 
-        # Restore baseline already contains one L3 metadata query.
-        restore_ms = restore_base_ms + backlog_ms
+        _, gpu_queue_ms = self.estimate_l3_gpu_queue_penalty(
+            storage_hit, waiting_queue_len
+        )
 
-        # True-recompute baseline skips L3 completely, while an early cost-model
-        # decision must first pay the metadata query used to discover L3 hits.
-        recompute_ms = recompute_base_ms + max(0.0, query_ms)
+        restore_ms = restore_base_ms + io_backlog_ms
+
+        recompute_ms = recompute_base_ms + max(0.0, query_ms) + gpu_queue_ms
 
         return restore_ms, recompute_ms
 
@@ -154,11 +216,13 @@ class HiCacheCostModel:
         storage_hit: int,
         io_pending_tokens: int,
         query_ms: float,
+        waiting_queue_len: int = 0,
     ):
         restore_ms, recompute_ms = self.estimate_l3(
             storage_hit,
             io_pending_tokens,
             query_ms,
+            waiting_queue_len,
         )
 
         # OOD / V2 profile: preserve native restore behavior.
