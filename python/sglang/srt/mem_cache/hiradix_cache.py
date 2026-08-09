@@ -1742,6 +1742,25 @@ class HiRadixCache(RadixCache):
         )
         self.cache_controller.prefetch_tokens_occupied += len(prefetch_key)
 
+        occupied = int(self.cache_controller.prefetch_tokens_occupied)
+        capacity = int(self.cache_controller.prefetch_capacity_limit)
+        storage_pressure = occupied / capacity if capacity > 0 else 0.0
+        prefetch_queue_depth = self.cache_controller.prefetch_queue.qsize()
+        ongoing_prefetch_count = len(self.ongoing_prefetch)
+
+        logger.info(
+            "[HiCachePrefetchPressure] request_id=%s prefetch_tokens=%d "
+            "occupied=%d capacity=%d storage_pressure=%.6f "
+            "prefetch_queue_depth=%d ongoing_prefetch=%d",
+            req_id,
+            len(prefetch_key),
+            occupied,
+            capacity,
+            storage_pressure,
+            prefetch_queue_depth,
+            ongoing_prefetch_count,
+        )
+
     def _insert_helper_host(
         self, node: TreeNode, key: RadixKey, host_value, hash_value
     ):
