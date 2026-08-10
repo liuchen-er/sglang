@@ -1261,28 +1261,6 @@ class HiRadixCache(RadixCache):
                 new_priority = self.eviction_strategy.get_priority(x.parent)
                 heapq.heappush(eviction_heap, (new_priority, x.parent))
 
-    # def _should_restore_l2(
-    #         self,
-    #         params: InitLoadBackParams,
-    # ) -> bool:
-    #     policy = self.restore_policy
-    #
-    #     if policy == "always_restore":
-    #         return True
-    #
-    #     if policy == "always_recompute":
-    #         return False
-    #
-    #     if policy == "token_threshold":
-    #         return (
-    #                 params.host_hit_length
-    #                 >= self.restore_token_threshold
-    #         )
-    #
-    #     raise ValueError(
-    #         f"Unknown HiCache restore policy: {policy}"
-    #     )
-
     def _decide_restore_l2(self, params: InitLoadBackParams):
         if self.restore_policy == "always_restore":
             return True, None, None
