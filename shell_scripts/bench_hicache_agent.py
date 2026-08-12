@@ -353,6 +353,12 @@ async def run_case(prefix_len, trial):
             }
         )
 
+    if os.getenv("NSYS_WAIT_BEFORE_REVISIT", "0") == "1":
+        input(
+            "[Nsight] L3 state is ready. Run `nsys start`, "
+            "then press Enter to launch revisit requests..."
+        )
+
     start = time.perf_counter()
 
     rows = await run_requests(
