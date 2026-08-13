@@ -2053,6 +2053,36 @@ class ServerArgs:
         "A dictionary in JSON string format, or a string starting with a leading '@' and a config file in JSON/YAML/TOML format, containing extra configuration for the storage backend.",
     ] = None
 
+    hicache_restore_policy: A[
+        str,
+        Arg(
+            help="Policy for restoring L2 host KV cache to GPU.",
+            choices=[
+                "always_restore",
+                "always_recompute",
+                "token_threshold",
+                "cost_model"
+            ],
+        )
+    ] = "always_restore"
+
+    hicache_restore_token_threshold: A[
+        int,
+        "Minium number of L2-hit tokens required to restore "
+        "host KV cache when hicache_restore_policy=token_threshold.",
+    ] = 0
+
+    hicache_cost_profile: A[
+        Optional[str],
+        "Offline HiCache restore/recompute cost profile path."
+    ] = None
+
+    hicache_restore_safety_margin_ms: A[
+        float,
+        "Safety margin for cost-aware L2 restore decision in milliseconds."
+    ] = 2.0
+
+
     # -------------------------------------------------------------------------
     # Hierarchical sparse attention
     # -------------------------------------------------------------------------

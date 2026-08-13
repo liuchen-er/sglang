@@ -189,6 +189,15 @@ class PrefetchOperation(StorageOperation):
         self._terminated_flag = False
         self.start_time = time.monotonic()
 
+        # Profiling timestamps for L3 prefetch stages.
+        self.query_done_time = None
+        self.io_enqueue_time = None
+        # Optional metadata-query result produced by the scheduler.
+        # If present, the storage prefetch worker reuses it instead of querying L3 again.
+        self.precomputed_storage_hit_count: Optional[int] = None
+        self.precomputed_hash_values: Optional[List[str]] = None
+        self.precomputed_query_ms: Optional[float] = None
+
         super().__init__(host_indices, token_ids, last_hash, prefix_keys=prefix_keys)
 
     def increment(self, num_tokens: int):
@@ -281,6 +290,12 @@ class HiCacheController:
 
         self.write_stream = device_module.Stream()
         self.load_stream = device_module.Stream()
+
+        # L3 prefetch I/O backlog profiling.
+        # Number of KV tokens that have passed the storage-hit query and are
+        # waiting for or currently undergoing storage -> host transfer.
+        self.prefetch_io_pending_tokens = 0
+        self.prefetch_io_backlog_lock = threading.Lock()
 
         # If a storage backend is provided at startup, treat it as an implicit attach,
         # so init/runtime share the same lifecycle semantics and code paths.
@@ -639,6 +654,8 @@ class HiCacheController:
             self.ack_backup_queue.queue.clear()
             self.host_mem_release_queue.queue.clear()
             self.prefetch_tokens_occupied = 0
+            with self.prefetch_io_backlog_lock:
+                self.prefetch_io_pending_tokens = 0
 
         self.storage_stop_event.clear()
 
@@ -866,6 +883,10 @@ class HiCacheController:
         self.draft_page_get_func = self._draft_page_get_generic
         self.draft_page_set_func = self._draft_page_set_generic
 
+    def get_prefetch_io_pending_tokens(self) -> int:
+        with self.prefetch_io_backlog_lock:
+            return int(self.prefetch_io_pending_tokens)
+
     def prefetch(
         self,
         request_id: str,
@@ -873,6 +894,9 @@ class HiCacheController:
         new_input_tokens: List[int],
         last_hash: Optional[str] = None,
         prefix_keys: Optional[List[str]] = None,
+        precomputed_hash_values: Optional[List[str]] = None,
+        precomputed_storage_hit_count: Optional[int] = None,
+        precomputed_query_ms: Optional[float] = None,
     ) -> PrefetchOperation:
         """
         Prefetch KV caches from storage backend to host memory.
@@ -880,6 +904,11 @@ class HiCacheController:
         operation = PrefetchOperation(
             request_id, host_indices, new_input_tokens, last_hash, prefix_keys
         )
+
+        operation.precomputed_hash_values = precomputed_hash_values
+        operation.precomputed_storage_hit_count = precomputed_storage_hit_count
+        operation.precomputed_query_ms = precomputed_query_ms
+
         self.prefetch_queue.put(operation)
         return operation
 
@@ -972,7 +1001,40 @@ class HiCacheController:
                 operation = self.prefetch_buffer.get(block=True, timeout=1)
                 if operation is None:
                     continue
+
+                io_start_time = time.monotonic()
+                if operation.io_enqueue_time is not None:
+                    io_wait_ms = (io_start_time - operation.io_enqueue_time) * 1000.0
+                else:
+                    io_wait_ms = 0.0
+
                 self._page_transfer(operation)
+
+                with self.prefetch_io_backlog_lock:
+                    self.prefetch_io_pending_tokens -= operation.completed_tokens
+                    if self.prefetch_io_pending_tokens < 0:
+                        self.prefetch_io_pending_tokens = 0
+                    io_pending_tokens_after = self.prefetch_io_pending_tokens
+
+                io_end_time = time.monotonic()
+                transfer_ms = (io_end_time - io_start_time) * 1000.0
+                total_prefetch_ms = (io_end_time - operation.start_time) * 1000.0
+                # [HiCachePrefetchIO] request_id=agent_target_cost_model_c16_t0_s30_p16384
+                # io_wait_ms=6728.748 transfer_ms=405.090 total_prefetch_ms=7134.092
+                # completed_tokens=16384 io_pending_tokens_after=16384
+                logger.info(
+                    "[HiCachePrefetchIO] request_id=%s "
+                    "io_wait_ms=%.3f transfer_ms=%.3f "
+                    "total_prefetch_ms=%.3f completed_tokens=%d "
+                    "io_pending_tokens_after=%d",
+                    operation.request_id,
+                    io_wait_ms,
+                    transfer_ms,
+                    total_prefetch_ms,
+                    operation.completed_tokens,
+                    io_pending_tokens_after,
+                )
+
                 # operation terminated by controller, release pre-allocated memory
                 self.append_host_mem_release(
                     operation.host_indices[operation.completed_tokens :]
@@ -1028,14 +1090,25 @@ class HiCacheController:
                 operation = self.prefetch_queue.get(block=True, timeout=1)
                 if operation is None:
                     continue
-                hash_value, storage_hit_count = self._storage_hit_query(operation)
-                storage_hit_count_tensor = torch.tensor(
-                    storage_hit_count, dtype=torch.int
-                )
-                self._all_reduce_prefetch_groups(
-                    storage_hit_count_tensor, torch.distributed.ReduceOp.MIN
-                )
-                storage_hit_count = storage_hit_count_tensor.item()
+
+                if operation.precomputed_storage_hit_count is not None:
+                    query_source = "precomputed"
+                    hash_value = operation.precomputed_hash_values
+                    storage_hit_count = operation.precomputed_storage_hit_count
+                    query_ms = operation.precomputed_query_ms or 0.0
+                else:
+                    query_source = "worker"
+                    hash_value, storage_hit_count = self._storage_hit_query(operation)
+                    storage_hit_count_tensor = torch.tensor(
+                        storage_hit_count, dtype=torch.int
+                    )
+                    self._all_reduce_prefetch_groups(
+                        storage_hit_count_tensor, torch.distributed.ReduceOp.MIN,
+                    )
+                    storage_hit_count = storage_hit_count_tensor.item()
+
+                    operation.query_done_time = time.monotonic()
+                    query_ms = (operation.query_done_time - operation.start_time) * 1000.0
 
                 if storage_hit_count < self.prefetch_threshold:
                     # not to prefetch if not enough benefits
@@ -1056,6 +1129,28 @@ class HiCacheController:
                     logger.debug(
                         f"Prefetching {len(operation.hash_value)} pages for request {operation.request_id}."
                     )
+
+                    operation.io_enqueue_time = time.monotonic()
+                    io_queue_depth = self.prefetch_buffer.qsize()
+
+                    with self.prefetch_io_backlog_lock:
+                        self.prefetch_io_pending_tokens += storage_hit_count
+                        io_pending_tokens = self.prefetch_io_pending_tokens
+
+                    # [HiCachePrefetchQuery] request_id=agent_target_cost_model_c16_t0_s31_p16384 query_source=precomputed
+                    # query_ms=1.025 storage_hit_tokens=16384 io_queue_depth=14 io_pending_tokens=262144
+                    logger.info(
+                        "[HiCachePrefetchQuery] request_id=%s "
+                        "query_source=%s query_ms=%.3f storage_hit_tokens=%d "
+                        "io_queue_depth=%d io_pending_tokens=%d",
+                        operation.request_id,
+                        query_source,
+                        query_ms,
+                        storage_hit_count,
+                        io_queue_depth,
+                        io_pending_tokens,
+                    )
+
                     self.prefetch_buffer.put(operation)
 
             except Empty:

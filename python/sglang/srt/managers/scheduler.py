@@ -2283,6 +2283,7 @@ class Scheduler(
 
     def _prefetch_kvcache(self, req: Req):
         if self.enable_hicache_storage:
+            # 在L1、L2中查询radixTree命中
             req.init_next_round_input(self.tree_cache, cow_mamba=False)
             last_host_node = req.last_host_node
             if last_host_node.backuped or last_host_node is self.tree_cache.root_node:
@@ -2293,11 +2294,169 @@ class Scheduler(
                 )
                 new_input_tokens = req.full_untruncated_fill_ids[matched_len:match_end]
 
+                if self.tree_cache.restore_policy == "always_recompute":
+                    io_pending_tokens = (
+                        self.tree_cache.cache_controller.get_prefetch_io_pending_tokens()
+                    )
+                    waiting_queue_len = len(self.waiting_queue)
+                    running_bs = len(self.running_batch.reqs)
+
+                    # [HiCacheEarlyDecision] policy=always_recompute action=skip_l3_prefetch rid=agent_target_always_recompute_c1_t0_s3_p8192
+                    # query_span_tokens=8255 io_pending_tokens=0
+                    logger.info(
+                        "[HiCacheEarlyDecision] policy=always_recompute "
+                        "action=skip_l3_prefetch rid=%s "
+                        "query_span_tokens=%d io_pending_tokens=%d "
+                        "waiting_queue_len=%d running_bs=%d",
+                        req.rid,
+                        len(new_input_tokens),
+                        io_pending_tokens,
+                        waiting_queue_len,
+                        running_bs,
+                    )
+                    return
+
+                # 根据上一个page的hash 编码此page的hashcode
                 prefix_keys = (
                     last_host_node.get_prefix_hash_values(last_host_node.parent)
                     if self.tree_cache.hicache_storage_pass_prefix_keys
                     else None
                 )
+
+                if self.tree_cache.restore_policy == "token_threshold":
+                    storage_query = self.tree_cache.query_storage_hit(
+                        last_host_node,
+                        new_input_tokens,
+                        last_hash,
+                        prefix_keys,
+                    )
+
+                    _, storage_hit_length, query_ms = storage_query
+
+                    should_restore = (
+                            storage_hit_length
+                            >= self.tree_cache.restore_token_threshold
+                    )
+
+                    # [HiCacheEarlyDecision] policy=token_threshold action=restore rid=agent_target_cost_model_c16_t0_s31_p16384
+                    # storage_hit_length=16384 threshold=64 query_ms=1.140
+                    logger.info(
+                        "[HiCacheEarlyDecision] policy=token_threshold "
+                        "action=%s rid=%s storage_hit_length=%d "
+                        "threshold=%d query_ms=%.3f",
+                        "restore" if should_restore else "recompute",
+                        req.rid,
+                        storage_hit_length,
+                        self.tree_cache.restore_token_threshold,
+                        query_ms,
+                    )
+
+                    if not should_restore:
+                        return
+
+                    self.tree_cache.prefetch_from_storage(
+                        req.rid,
+                        last_host_node,
+                        new_input_tokens,
+                        last_hash,
+                        prefix_keys,
+                        precomputed_query=storage_query,
+                    )
+                    return
+
+                if self.tree_cache.restore_policy == "cost_model":
+                    # 去L3按照pageSize 进行连续page Hash查询
+                    storage_query = self.tree_cache.query_storage_hit(
+                        last_host_node,
+                        new_input_tokens,
+                        last_hash,
+                        prefix_keys,
+                    )
+
+                    _, storage_hit_length, query_ms = storage_query
+
+                    if storage_hit_length < self.tree_cache.prefetch_threshold:
+                        logger.info(
+                            "[HiCacheEarlyDecision] policy=cost_model "
+                            "action=recompute rid=%s storage_hit_length=%d "
+                            "reason=insufficient_l3_hit query_ms=%.3f",
+                            req.rid,
+                            storage_hit_length,
+                            query_ms,
+                        )
+                        return
+
+                    io_pending_tokens = (
+                        self.tree_cache.cache_controller.get_prefetch_io_pending_tokens()
+                    )
+                    admission_pending_tokens = int(
+                        self.tree_cache.cache_controller.prefetch_tokens_occupied
+                    )
+                    waiting_queue_len = len(self.waiting_queue)
+                    running_bs = len(self.running_batch.reqs)
+                    gpu_queue_beta, gpu_queue_penalty_ms = (
+                        self.tree_cache.cost_model.estimate_l3_gpu_queue_penalty(
+                            storage_hit_length,
+                            waiting_queue_len,
+                        )
+                    )
+
+                    (
+                        should_restore,
+                        estimated_restore_ms,
+                        estimated_recompute_ms,
+                    ) = self.tree_cache.cost_model.decide_l3(
+                        storage_hit_length,
+                        io_pending_tokens,
+                        query_ms,
+                        waiting_queue_len,
+                    )
+
+                    logger.info(
+                        "[HiCacheEarlyDecision] policy=cost_model "
+                        "action=%s rid=%s storage_hit_length=%d "
+                        "io_pending_tokens=%d admission_pending_tokens=%d "
+                        "waiting_queue_len=%d running_bs=%d "
+                        "gpu_queue_beta=%.3f gpu_queue_penalty_ms=%.3f "
+                        "query_ms=%.3f "
+                        "estimated_restore_ms=%s estimated_recompute_ms=%s",
+                        "restore" if should_restore else "recompute",
+                        req.rid,
+                        storage_hit_length,
+                        io_pending_tokens,
+                        admission_pending_tokens,
+                        waiting_queue_len,
+                        running_bs,
+                        gpu_queue_beta,
+                        gpu_queue_penalty_ms,
+                        query_ms,
+                        (
+                            f"{estimated_restore_ms:.3f}"
+                            if estimated_restore_ms is not None
+                            else "NA"
+                        ),
+                        (
+                            f"{estimated_recompute_ms:.3f}"
+                            if estimated_recompute_ms is not None
+                            else "NA"
+                        ),
+                    )
+
+                    if not should_restore:
+                        return
+
+                    # 提交prefetch任务到prefetch_queue，由另外的线程触发读取
+                    # 函数内会在L2预留slot，不够的话，触发evict，仍然不够的话，截断prefetch
+                    self.tree_cache.prefetch_from_storage(
+                        req.rid,
+                        last_host_node,
+                        new_input_tokens,
+                        last_hash,
+                        prefix_keys,
+                        precomputed_query=storage_query,
+                    )
+                    return
+
                 self.tree_cache.prefetch_from_storage(
                     req.rid,
                     last_host_node,
@@ -2971,6 +3130,7 @@ class Scheduler(
         )
 
         self.max_prefill_bs = max(self.max_prefill_bs, len(can_run_list))
+        # 启动H2D拷贝
         if self.enable_hierarchical_cache:
             # todo (zhiqiang): disable cuda graph execution if hicache loading triggered
             new_batch.hicache_consumer_index = (

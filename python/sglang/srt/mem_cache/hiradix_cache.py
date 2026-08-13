@@ -81,6 +81,7 @@ class HiRadixCache(RadixCache):
         self.page_size = params.page_size
         self.kv_cache = params.token_to_kv_pool_allocator.get_kvcache()
 
+        # this
         if isinstance(self.kv_cache, MHATokenToKVPool):
             self.token_to_kv_pool_host = get_mha_host_pool_cls(self.kv_cache)(
                 self.kv_cache,
@@ -205,12 +206,41 @@ class HiRadixCache(RadixCache):
         )
         self.load_back_threshold = 10
 
+        self.restore_policy = server_args.hicache_restore_policy
+        self.restore_token_threshold = (
+            server_args.hicache_restore_token_threshold
+        )
+
+        # HiCache L2 restore policy: cost_model, token_threshold=0
+        logger.info(
+            "HiCache L2 restore policy: %s, token_threshold=%d",
+            self.restore_policy,
+            self.restore_token_threshold,
+        )
+
+        self.cost_model = None
+        if self.restore_policy == "cost_model":
+            if not server_args.hicache_cost_profile:
+                raise ValueError("--hicache-cost-profile is required for cost_model policy")
+            from sglang.srt.mem_cache.hicache_cost_model import HiCacheCostModel
+            self.cost_model = HiCacheCostModel(
+                server_args.hicache_cost_profile,
+                server_args.hicache_restore_safety_margin_ms,
+            )
+
         # Detach storage backend automatically on process shutdown
         atexit.register(self.shutdown)
 
         self.evictable_host_leaves = set()
 
         super().__init__(params=params)
+
+        # HiCache controller initialized: controller=HiCacheController kv_cache=MHATokenToKVPool
+        logger.info(
+            "HiCache controller initialized: controller=%s kv_cache=%s",
+            type(self.cache_controller).__name__,
+            type(self.kv_cache).__name__,
+        )
 
     def _all_reduce_attn_groups(self, tensor: torch.Tensor, op):
         reduced = False
@@ -1234,6 +1264,27 @@ class HiRadixCache(RadixCache):
                 new_priority = self.eviction_strategy.get_priority(x.parent)
                 heapq.heappush(eviction_heap, (new_priority, x.parent))
 
+    def _decide_restore_l2(self, params: InitLoadBackParams):
+        if self.restore_policy == "always_restore":
+            return True, None, None
+
+        if self.restore_policy == "always_recompute":
+            return False, None, None
+
+        if self.restore_policy == "token_threshold":
+            return params.host_hit_length >= self.restore_token_threshold, None, None
+
+        if self.restore_policy == "cost_model":
+            # 如果当前请求已经按照 Early CostModel 的决定从 L3 把 KV 搬到了 Host，就不允许在 Host→GPU 阶段再反悔做 Recompute
+            if params.req is not None and params.req.storage_hit_length > 0:
+                return True, None, None
+
+            should_restore, restore_ms, recompute_ms = self.cost_model.decide(
+                params.host_hit_length, params.running_batch_size)
+            return should_restore, restore_ms, recompute_ms
+
+        raise ValueError(f"Unknown HiCache restore policy: {self.restore_policy}")
+
     def load_back(
         self, node: TreeNode, mem_quota: Optional[int] = None
     ) -> Optional[torch.Tensor]:
@@ -1321,6 +1372,54 @@ class HiRadixCache(RadixCache):
         last_node = params.best_match_node
         mem_quota = params.mem_quota
         if last_node.evicted:
+            qload = len(self.cache_controller.load_queue)
+            host_node_id = last_node.id
+            host_hit_length = params.host_hit_length
+            io_pending_tokens = (
+                self.cache_controller.get_prefetch_io_pending_tokens()
+                if self.enable_storage else 0
+            )
+
+            should_restore, estimated_restore_ms, estimated_recompute_ms = self._decide_restore_l2(params)
+
+            logger.info(
+                "[HiCacheCost] rid=%s estimated_restore_ms=%s estimated_recompute_ms=%s",
+                params.req.rid,
+                f"{estimated_restore_ms:.3f}" if estimated_restore_ms is not None else "NA",
+                f"{estimated_recompute_ms:.3f}" if estimated_recompute_ms is not None else "NA",
+            )
+
+            if not should_restore:
+                while last_node.evicted:
+                    last_node = last_node.parent
+
+                # 这次虽然发现了 Host Hit,但策略主动选择重新 Prefill。
+                # 必须清掉 Host Hit 标记，否则后续缓存统计会错误认为这些 Token 来自 L2。
+                if params.req is not None:
+                    logger.info(
+                        "[HiCacheDecision] policy=%s action=recompute rid=%s prompt_len=%d host_hit_length=%d "
+                        "host_node_id=%d fallback_node_id=%d threshold=%d prefill_batch_tokens=%d running_bs=%d qload=%d io_pending_tokens=%d ",
+                        self.restore_policy, params.req.rid, len(params.req.full_untruncated_fill_ids),
+                        host_hit_length, host_node_id, last_node.id, self.restore_token_threshold,
+                        params.prefill_batch_tokens, params.running_batch_size, qload,
+                        io_pending_tokens,
+                    )
+
+                return (
+                    self._empty_match_result.device_indices,
+                    last_node,
+                )
+
+            if params.req is not None:
+                logger.info(
+                    "[HiCacheDecision] policy=%s action=restore rid=%s prompt_len=%d host_hit_length=%d "
+                    "host_node_id=%d threshold=%d prefill_batch_tokens=%d running_bs=%d qload=%d io_pending_tokens=%d ",
+                    self.restore_policy, params.req.rid, len(params.req.full_untruncated_fill_ids),
+                    host_hit_length, host_node_id, self.restore_token_threshold,
+                    params.prefill_batch_tokens, params.running_batch_size, qload,
+                    io_pending_tokens,
+                )
+
             loading_values = self.load_back(last_node, mem_quota)
             if loading_values is not None:
                 logger.debug(
@@ -1336,32 +1435,37 @@ class HiRadixCache(RadixCache):
             last_node,
         )
 
-    def query_storage_hit_length(
-        self,
-        last_host_node: TreeNode,
-        new_input_tokens: List[int],
-        last_hash: Optional[str] = None,
-        prefix_keys: Optional[List[str]] = None,
-    ) -> int:
+    def query_storage_hit(
+            self,
+            last_host_node: TreeNode,
+            new_input_tokens: List[int],
+            last_hash: Optional[str] = None,
+            prefix_keys: Optional[List[str]] = None,
+    ) -> Tuple[List[str], int, float]:
         if not self.enable_storage or self.cache_controller.prefetch_rate_limited():
-            return 0
+            return [], 0, 0.0
 
         prefetch_key = RadixKey(
             new_input_tokens,
             extra_key=last_host_node.key.extra_key,
             is_bigram=self.is_eagle,
         ).page_aligned(self.page_size)
+
         if len(prefetch_key) < self.prefetch_threshold:
-            return 0
+            return [], 0, 0.0
 
         prefetch_op_cls = (
             HybridPrefetchOperation
             if isinstance(self.cache_controller, HybridCacheController)
             else PrefetchOperation
         )
+
         extra_kwargs = {}
         if prefetch_op_cls is HybridPrefetchOperation:
-            extra_kwargs["pool_transfers"] = self._get_extra_pools().get("extra_pools")
+            extra_kwargs["pool_transfers"] = (
+                self._get_extra_pools().get("extra_pools")
+            )
+
         operation = prefetch_op_cls(
             "__storage_hit_query__",
             self.cache_controller.mem_pool_host.get_dummy_flat_data_page()[:0],
@@ -1370,15 +1474,47 @@ class HiRadixCache(RadixCache):
             prefix_keys,
             **extra_kwargs,
         )
-        hash_values, storage_hit_count = self.cache_controller._storage_hit_query(
-            operation
+
+        start = time.monotonic()
+
+        hash_values, storage_hit_count = (
+            self.cache_controller._storage_hit_query(operation)
         )
-        storage_hit_count_tensor = torch.tensor(storage_hit_count, dtype=torch.int)
+
+        storage_hit_count_tensor = torch.tensor(
+            storage_hit_count,
+            dtype=torch.int,
+        )
+
         self._all_reduce_attn_groups(
-            storage_hit_count_tensor, torch.distributed.ReduceOp.MIN
+            storage_hit_count_tensor,
+            torch.distributed.ReduceOp.MIN,
         )
+
         storage_hit_count = storage_hit_count_tensor.item()
-        storage_hit_count = storage_hit_count - (storage_hit_count % self.page_size)
+        storage_hit_count -= storage_hit_count % self.page_size
+
+        hash_values = hash_values[
+            : storage_hit_count // self.page_size
+        ]
+
+        query_ms = (time.monotonic() - start) * 1000.0
+
+        return hash_values, storage_hit_count, query_ms
+
+    def query_storage_hit_length(
+        self,
+        last_host_node: TreeNode,
+        new_input_tokens: List[int],
+        last_hash: Optional[str] = None,
+        prefix_keys: Optional[List[str]] = None,
+    ) -> int:
+        _, storage_hit_count, _ = self.query_storage_hit(
+            last_host_node,
+            new_input_tokens,
+            last_hash,
+            prefix_keys,
+        )
         return storage_hit_count
 
     def ready_to_load_host_cache(self) -> int:
@@ -1589,6 +1725,7 @@ class HiRadixCache(RadixCache):
         new_input_tokens: List[int],
         last_hash: Optional[str] = None,
         prefix_keys: Optional[List[str]] = None,
+        precomputed_query: Optional[Tuple[List[str], int, float]] = None,
     ):
         prefetch_key = RadixKey(
             new_input_tokens,
@@ -1598,6 +1735,27 @@ class HiRadixCache(RadixCache):
         # align the number of fetching tokens to the page size
         prefetch_key = prefetch_key.page_aligned(self.page_size)
         prefetch_length = len(prefetch_key)
+
+        precomputed_hash_values = None
+        precomputed_storage_hit_count = None
+        precomputed_query_ms = None
+
+        if precomputed_query is not None:
+            (
+                precomputed_hash_values,
+                precomputed_storage_hit_count,
+                precomputed_query_ms,
+            ) = precomputed_query
+
+            if precomputed_storage_hit_count < self.prefetch_threshold:
+                return
+
+            prefetch_length = min(
+                prefetch_length,
+                precomputed_storage_hit_count,
+            )
+            prefetch_key = prefetch_key[:prefetch_length]
+
         if (
             not self.enable_storage
             or prefetch_length < self.prefetch_threshold
@@ -1625,12 +1783,25 @@ class HiRadixCache(RadixCache):
                 last_host_node.release_host()
                 # no sufficient host memory for prefetch
                 return
+
+        if precomputed_storage_hit_count is not None:
+            precomputed_storage_hit_count = min(
+                precomputed_storage_hit_count,
+                prefetch_length,
+            )
+            precomputed_hash_values = precomputed_hash_values[
+                : precomputed_storage_hit_count // self.page_size
+            ]
+
         operation = self.cache_controller.prefetch(
             req_id,
             host_indices,
             prefetch_key,
             last_hash,
             prefix_keys,
+            precomputed_hash_values=precomputed_hash_values,
+            precomputed_storage_hit_count=precomputed_storage_hit_count,
+            precomputed_query_ms=precomputed_query_ms,
             **self._get_extra_pools(),
         )
         self.ongoing_prefetch[req_id] = (
@@ -1640,6 +1811,28 @@ class HiRadixCache(RadixCache):
             operation,
         )
         self.cache_controller.prefetch_tokens_occupied += len(prefetch_key)
+
+        occupied = int(self.cache_controller.prefetch_tokens_occupied)
+        capacity = int(self.cache_controller.prefetch_capacity_limit)
+        storage_pressure = occupied / capacity if capacity > 0 else 0.0
+        prefetch_queue_depth = self.cache_controller.prefetch_queue.qsize()
+        ongoing_prefetch_count = len(self.ongoing_prefetch)
+
+        # [HiCachePrefetchPressure] request_id=agent_target_token_threshold_c16_t0_s29_p16384
+        # prefetch_tokens=16384 occupied=262144 capacity=348800 storage_pressure=0.751560
+        # prefetch_queue_depth=1 ongoing_prefetch=16
+        logger.info(
+            "[HiCachePrefetchPressure] request_id=%s prefetch_tokens=%d "
+            "occupied=%d capacity=%d storage_pressure=%.6f "
+            "prefetch_queue_depth=%d ongoing_prefetch=%d",
+            req_id,
+            len(prefetch_key),
+            occupied,
+            capacity,
+            storage_pressure,
+            prefetch_queue_depth,
+            ongoing_prefetch_count,
+        )
 
     def _insert_helper_host(
         self, node: TreeNode, key: RadixKey, host_value, hash_value
