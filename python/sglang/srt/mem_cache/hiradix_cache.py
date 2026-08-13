@@ -81,6 +81,7 @@ class HiRadixCache(RadixCache):
         self.page_size = params.page_size
         self.kv_cache = params.token_to_kv_pool_allocator.get_kvcache()
 
+        # this
         if isinstance(self.kv_cache, MHATokenToKVPool):
             self.token_to_kv_pool_host = get_mha_host_pool_cls(self.kv_cache)(
                 self.kv_cache,
@@ -210,6 +211,7 @@ class HiRadixCache(RadixCache):
             server_args.hicache_restore_token_threshold
         )
 
+        # HiCache L2 restore policy: cost_model, token_threshold=0
         logger.info(
             "HiCache L2 restore policy: %s, token_threshold=%d",
             self.restore_policy,
@@ -233,6 +235,7 @@ class HiRadixCache(RadixCache):
 
         super().__init__(params=params)
 
+        # HiCache controller initialized: controller=HiCacheController kv_cache=MHATokenToKVPool
         logger.info(
             "HiCache controller initialized: controller=%s kv_cache=%s",
             type(self.cache_controller).__name__,
@@ -1815,6 +1818,9 @@ class HiRadixCache(RadixCache):
         prefetch_queue_depth = self.cache_controller.prefetch_queue.qsize()
         ongoing_prefetch_count = len(self.ongoing_prefetch)
 
+        # [HiCachePrefetchPressure] request_id=agent_target_token_threshold_c16_t0_s29_p16384
+        # prefetch_tokens=16384 occupied=262144 capacity=348800 storage_pressure=0.751560
+        # prefetch_queue_depth=1 ongoing_prefetch=16
         logger.info(
             "[HiCachePrefetchPressure] request_id=%s prefetch_tokens=%d "
             "occupied=%d capacity=%d storage_pressure=%.6f "

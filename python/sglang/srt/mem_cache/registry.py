@@ -208,6 +208,7 @@ def create_tree_cache(ctx: TreeCacheBuildContext) -> BasePrefixCache:
         cache = StreamingSession(cache)
         streaming_wrapped = True
 
+    # Tree cache initialized: source=default impl=HiRadixCache hybrid_swa=False hybrid_ssm=False hierarchical=True streaming_wrapped=False
     logger.info(
         "Tree cache initialized: source=%s impl=%s hybrid_swa=%s hybrid_ssm=%s "
         "hierarchical=%s streaming_wrapped=%s",

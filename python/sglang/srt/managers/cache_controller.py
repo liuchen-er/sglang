@@ -1019,6 +1019,9 @@ class HiCacheController:
                 io_end_time = time.monotonic()
                 transfer_ms = (io_end_time - io_start_time) * 1000.0
                 total_prefetch_ms = (io_end_time - operation.start_time) * 1000.0
+                # [HiCachePrefetchIO] request_id=agent_target_cost_model_c16_t0_s30_p16384
+                # io_wait_ms=6728.748 transfer_ms=405.090 total_prefetch_ms=7134.092
+                # completed_tokens=16384 io_pending_tokens_after=16384
                 logger.info(
                     "[HiCachePrefetchIO] request_id=%s "
                     "io_wait_ms=%.3f transfer_ms=%.3f "
@@ -1134,6 +1137,8 @@ class HiCacheController:
                         self.prefetch_io_pending_tokens += storage_hit_count
                         io_pending_tokens = self.prefetch_io_pending_tokens
 
+                    # [HiCachePrefetchQuery] request_id=agent_target_cost_model_c16_t0_s31_p16384 query_source=precomputed
+                    # query_ms=1.025 storage_hit_tokens=16384 io_queue_depth=14 io_pending_tokens=262144
                     logger.info(
                         "[HiCachePrefetchQuery] request_id=%s "
                         "query_source=%s query_ms=%.3f storage_hit_tokens=%d "

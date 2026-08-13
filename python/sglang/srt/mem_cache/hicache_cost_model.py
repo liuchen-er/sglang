@@ -187,10 +187,12 @@ class HiCacheCostModel:
         if self.version < 3:
             return None, None
 
+        #  restore耗时
         restore_base_ms = self._interp_l3(
             self.l3_restore_curve,
             storage_hit,
         )
+        # 重计算耗时
         recompute_base_ms = self._interp_l3(
             self.l3_recompute_curve,
             storage_hit,
@@ -199,12 +201,15 @@ class HiCacheCostModel:
         if restore_base_ms is None or recompute_base_ms is None:
             return None, None
 
+        # 预测积压排队耗时
         io_backlog_ms = max(0, io_pending_tokens) * self.l3_io_backlog_ms_per_token
 
         _, gpu_queue_ms = self.estimate_l3_gpu_queue_penalty(
             storage_hit, waiting_queue_len
         )
 
+
+        # restore_base_ms 已经包含查询时间
         restore_ms = restore_base_ms + io_backlog_ms
 
         recompute_ms = recompute_base_ms + max(0.0, query_ms) + gpu_queue_ms

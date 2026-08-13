@@ -2283,6 +2283,7 @@ class Scheduler(
 
     def _prefetch_kvcache(self, req: Req):
         if self.enable_hicache_storage:
+            # 在L1、L2中查询radixTree命中
             req.init_next_round_input(self.tree_cache, cow_mamba=False)
             last_host_node = req.last_host_node
             if last_host_node.backuped or last_host_node is self.tree_cache.root_node:
@@ -2300,6 +2301,8 @@ class Scheduler(
                     waiting_queue_len = len(self.waiting_queue)
                     running_bs = len(self.running_batch.reqs)
 
+                    # [HiCacheEarlyDecision] policy=always_recompute action=skip_l3_prefetch rid=agent_target_always_recompute_c1_t0_s3_p8192
+                    # query_span_tokens=8255 io_pending_tokens=0
                     logger.info(
                         "[HiCacheEarlyDecision] policy=always_recompute "
                         "action=skip_l3_prefetch rid=%s "
@@ -2313,6 +2316,7 @@ class Scheduler(
                     )
                     return
 
+                # 根据上一个page的hash 编码此page的hashcode
                 prefix_keys = (
                     last_host_node.get_prefix_hash_values(last_host_node.parent)
                     if self.tree_cache.hicache_storage_pass_prefix_keys
@@ -2334,6 +2338,8 @@ class Scheduler(
                             >= self.tree_cache.restore_token_threshold
                     )
 
+                    # [HiCacheEarlyDecision] policy=token_threshold action=restore rid=agent_target_cost_model_c16_t0_s31_p16384
+                    # storage_hit_length=16384 threshold=64 query_ms=1.140
                     logger.info(
                         "[HiCacheEarlyDecision] policy=token_threshold "
                         "action=%s rid=%s storage_hit_length=%d "
@@ -2359,6 +2365,7 @@ class Scheduler(
                     return
 
                 if self.tree_cache.restore_policy == "cost_model":
+                    # 去L3按照pageSize 进行连续page Hash查询
                     storage_query = self.tree_cache.query_storage_hit(
                         last_host_node,
                         new_input_tokens,
@@ -2438,6 +2445,8 @@ class Scheduler(
                     if not should_restore:
                         return
 
+                    # 提交prefetch任务到prefetch_queue，由另外的线程触发读取
+                    # 函数内会在L2预留slot，不够的话，触发evict，仍然不够的话，截断prefetch
                     self.tree_cache.prefetch_from_storage(
                         req.rid,
                         last_host_node,
@@ -3121,6 +3130,7 @@ class Scheduler(
         )
 
         self.max_prefill_bs = max(self.max_prefill_bs, len(can_run_list))
+        # 启动H2D拷贝
         if self.enable_hierarchical_cache:
             # todo (zhiqiang): disable cuda graph execution if hicache loading triggered
             new_batch.hicache_consumer_index = (
