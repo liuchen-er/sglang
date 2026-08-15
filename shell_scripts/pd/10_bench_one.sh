@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [ $# -ne 5 ]; then
+if [ $# -lt 5 ] || [ $# -gt 6 ]; then
     echo "Usage:"
-    echo "$0 <colocated|pd> <input_len> <output_len> <concurrency> <request_rate>"
+    echo "$0 <colocated|pd> <input_len> <output_len> <concurrency> <request_rate> [num_prompts]"
+    echo
+    echo "Example:"
+    echo "$0 colocated 4096 256 8 inf"
+    echo "$0 colocated 4096 256 8 inf 500"
     exit 1
 fi
 
@@ -12,14 +16,24 @@ INPUT_LEN=$2
 OUTPUT_LEN=$3
 CONC=$4
 RATE=$5
+NUM_PROMPTS=${6:-300}
+
+if [ "$MODE" != "colocated" ] && [ "$MODE" != "pd" ]; then
+    echo "ERROR: mode must be colocated or pd"
+    exit 1
+fi
+
+if ! [[ "$NUM_PROMPTS" =~ ^[1-9][0-9]*$ ]]; then
+    echo "ERROR: num_prompts must be a positive integer"
+    exit 1
+fi
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 source "$SCRIPT_DIR/00_common.sh"
 
-NUM_PROMPTS=$((CONC * 8))
 TS=$(date +%Y%m%d_%H%M%S)
 
-TAG="${MODE}_i${INPUT_LEN}_o${OUTPUT_LEN}_c${CONC}_r${RATE}_${TS}"
+TAG="${MODE}_i${INPUT_LEN}_o${OUTPUT_LEN}_c${CONC}_r${RATE}_n${NUM_PROMPTS}_${TS}"
 
 RESULT_DIR="$RESULT_ROOT/raw/$MODE"
 BENCH_LOG_DIR="$LOG_ROOT/benchmark/$MODE"
