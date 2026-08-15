@@ -47,7 +47,7 @@ wait_worker() {
     echo "Waiting for $name..."
 
     until curl -sf "http://127.0.0.1:${port}/model_info" >/dev/null; do
-        sleep 2
+        sleep 1
     done
 
     echo "$name ready."
@@ -68,8 +68,13 @@ nohup "$ROUTER_BIN" launch \
 
 echo $! > "$RUN_DIR/router.pid"
 
-sleep 3
+echo "Waiting for router..."
 
+until curl -sf "http://${HOST}:${ROUTER_PORT}/v1/models" >/dev/null; do
+    sleep 0.5
+done
+
+echo "Router ready."
 echo
 echo "========================================="
 echo "PD deployment ready"

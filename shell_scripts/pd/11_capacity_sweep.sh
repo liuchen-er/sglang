@@ -59,7 +59,7 @@ for INPUT in 4096 8192; do
                 inf \
                 "$NUM_PROMPTS"
 
-            sleep 5
+            sleep 1
         done
     done
 done
