@@ -16,8 +16,6 @@ RATE=$5
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 source "$SCRIPT_DIR/00_common.sh"
 
-BENCH="$REPO/python/sglang/benchmark/serving.py"
-
 NUM_PROMPTS=$((CONC * 8))
 TS=$(date +%Y%m%d_%H%M%S)
 
@@ -48,7 +46,8 @@ echo "Prompts      : $NUM_PROMPTS"
 echo "Result       : $RESULT_FILE"
 echo "==========================================="
 
-python "$BENCH" \
+PYTHONPATH="$REPO/python${PYTHONPATH:+:$PYTHONPATH}" \
+python -c 'from sglang.benchmark.serving import cli_main; cli_main()' \
     --backend sglang \
     --base-url "http://${HOST}:${ROUTER_PORT}" \
     --model "$MODEL_PATH" \
