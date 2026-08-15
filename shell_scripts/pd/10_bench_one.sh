@@ -55,7 +55,8 @@ python -c 'from sglang.benchmark.serving import cli_main; cli_main()' \
     --num-prompts "$NUM_PROMPTS" \
     --random-input-len "$INPUT_LEN" \
     --random-output-len "$OUTPUT_LEN" \
-    --random-range-ratio 0 \
+    --random-range-ratio 1.0 \
+    --tokenize-prompt \
     --request-rate "$RATE" \
     --max-concurrency "$CONC" \
     --warmup-requests 4 \
