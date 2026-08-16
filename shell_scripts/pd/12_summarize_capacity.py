@@ -71,8 +71,8 @@ def main():
     args = parser.parse_args()
 
     exp_root = Path(args.exp_root)
-    input_dir = exp_root / "results" / "raw" / args.mode
-    output_dir = exp_root / "results" / "summary"
+    input_dir = exp_root / "results" / "raw" / "capacity" / args.mode
+    output_dir = exp_root / "results" / "summary" / "capacity"
     output_dir.mkdir(parents=True, exist_ok=True)
 
     files = sorted(input_dir.glob("*.jsonl"))
