@@ -47,6 +47,7 @@ run_case() {
     done
 }
 
+# 50% 75% 90%
 # 4K: based on PD saturation ≈ 1.45 req/s
 for RATE in 0.73 1.09 1.30; do
     run_case 4096 "$RATE"
