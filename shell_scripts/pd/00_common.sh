@@ -13,6 +13,11 @@ export EXP_ROOT=/root/autodl-tmp/sglang_pd_exp
 
 export LOG_ROOT="$EXP_ROOT/logs"
 export RESULT_ROOT="$EXP_ROOT/results"
+export SERVER_LOG_ROOT="$LOG_ROOT/server"
+export BENCH_LOG_ROOT="$LOG_ROOT/benchmark"
+
+export RESULT_RAW_ROOT="$RESULT_ROOT/raw"
+export RESULT_SUMMARY_ROOT="$RESULT_ROOT/summary"
 export PROFILE_ROOT="$EXP_ROOT/profiles"
 export RUN_ROOT="$EXP_ROOT/run"
 export META_ROOT="$EXP_ROOT/meta"
