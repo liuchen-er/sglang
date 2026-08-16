@@ -77,7 +77,6 @@ COMMON_SERVER_ARGS=(
     --chunked-prefill-size 2048
     --max-prefill-tokens 16384
     --context-length 32768
-    --page-size 16
 )
 
 # ============================================================
