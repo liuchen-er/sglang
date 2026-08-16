@@ -21,6 +21,7 @@ OUTPUT_LEN=$3
 CONC=$4
 RATE=$5
 NUM_PROMPTS=${6:-300}
+WARMUP_REQUESTS=${WARMUP_REQUESTS:-4}
 
 # Experiment phase:
 #   capacity
@@ -138,7 +139,7 @@ python -c 'from sglang.benchmark.serving import cli_main; cli_main()' \
     --tokenize-prompt \
     --request-rate "$RATE" \
     --max-concurrency "$CONC" \
-    --warmup-requests 4 \
+    --warmup-requests "$WARMUP_REQUESTS" \
     --flush-cache \
     --seed 42 \
     --temperature 0 \
