@@ -4,8 +4,9 @@ set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 source "$SCRIPT_DIR/00_common.sh"
 
+PHASE=${1:-manual}
 MODE=colocated
-LOG_DIR="$LOG_ROOT/$MODE"
+LOG_DIR="$SERVER_LOG_ROOT/$PHASE/$MODE"
 RUN_DIR="$RUN_ROOT/$MODE"
 
 mkdir -p "$LOG_DIR" "$RUN_DIR"
