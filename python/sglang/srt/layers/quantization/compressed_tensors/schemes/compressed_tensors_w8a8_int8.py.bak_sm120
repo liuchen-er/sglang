@@ -5,7 +5,6 @@
 from typing import Callable, Optional
 
 import torch
-import torch.nn.functional as F
 from compressed_tensors.quantization import QuantizationStrategy
 from torch.nn import Parameter
 
@@ -30,53 +29,6 @@ _is_cuda = is_cuda()
 if _is_cuda:
     from sgl_kernel import int8_scaled_mm
 
-def _sm120_int8_scaled_mm_fallback(
-    x_q: torch.Tensor,
-    weight: torch.Tensor,
-    x_scale: torch.Tensor,
-    weight_scale: torch.Tensor,
-    out_dtype: torch.dtype,
-    bias: Optional[torch.Tensor] = None,
-) -> torch.Tensor:
-    """Functional W8A8 fallback for NVIDIA SM120.
-
-    Uses torch._int_mm for INT8 x INT8 -> INT32, then applies
-    per-token activation scales and per-channel weight scales.
-
-    torch._int_mm requires M > 16, so small-M decode batches
-    are zero-padded to M=17 and sliced back afterwards.
-    """
-
-    m = x_q.shape[0]
-
-    if m <= 16:
-        x_work = F.pad(
-            x_q,
-            (0, 0, 0, 17 - m),
-            mode="constant",
-            value=0,
-        )
-    else:
-        x_work = x_q
-
-    # INT8 x INT8 -> INT32
-    acc = torch._int_mm(x_work, weight)
-
-    # Remove padded rows.
-    acc = acc[:m]
-
-    n = weight.shape[1]
-
-    out = (
-        acc.float()
-        * x_scale.reshape(m, 1).float()
-        * weight_scale.reshape(1, n).float()
-    )
-
-    if bias is not None:
-        out = out + bias.reshape(1, n).float()
-
-    return out.to(out_dtype)
 
 class CompressedTensorsW8A8Int8(CompressedTensorsLinearScheme):
 
@@ -217,40 +169,13 @@ class CompressedTensorsW8A8Int8(CompressedTensorsLinearScheme):
             layer.azp_adj = None
 
     def apply_weights(
-            self, layer: torch.nn.Module, x: torch.Tensor, bias: Optional[torch.Tensor]
+        self, layer: torch.nn.Module, x: torch.Tensor, bias: Optional[torch.Tensor]
     ) -> torch.Tensor:
         # TODO: add cutlass_scaled_mm_azp support
         x_q, x_scale = per_token_quant_int8(x)
 
-        capability = torch.cuda.get_device_capability(x.device)
-
-        # Functional fallback for RTX 50-series Blackwell / SM120.
-        #
-        # Scope this fallback only to the quantization scheme we have
-        # explicitly validated:
-        #   - dynamic activation quantization
-        #   - symmetric activation quantization
-        if (
-                capability == (12, 0)
-                and not self.is_static_input_scheme
-                and self.input_symmetric
-        ):
-            return _sm120_int8_scaled_mm_fallback(
-                x_q=x_q,
-                weight=layer.weight,
-                x_scale=x_scale,
-                weight_scale=layer.weight_scale,
-                out_dtype=x.dtype,
-                bias=bias,
-            )
-
         return int8_scaled_mm(
-            x_q,
-            layer.weight,
-            x_scale,
-            layer.weight_scale,
-            out_dtype=x.dtype,
-            bias=bias,
+            x_q, layer.weight, x_scale, layer.weight_scale, out_dtype=x.dtype, bias=bias
         )
 
 
