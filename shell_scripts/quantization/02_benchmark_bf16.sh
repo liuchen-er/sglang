@@ -44,6 +44,7 @@ python -m sglang.benchmark.serving \
     --dataset-name random-ids \
     --tokenize-prompt \
     --seed 42 \
+    --flush-cache \
     --num-prompts "$NUM_PROMPTS" \
     --random-input-len "$INPUT_LEN" \
     --random-output-len "$OUTPUT_LEN" \
