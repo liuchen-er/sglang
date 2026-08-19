@@ -14,18 +14,25 @@ NUM_PROMPTS=${4:-20}
 
 cd "$SGLANG_ROOT"
 
-mkdir -p "$EXP_ROOT/results/bf16"
+RESULT_DIR="$EXP_ROOT/results/bf16"
+mkdir -p "$RESULT_DIR"
 
-TAG="in${INPUT_LEN}_out${OUTPUT_LEN}_c${CONCURRENCY}_n${NUM_PROMPTS}"
-OUT="$EXP_ROOT/results/bf16/${TAG}.jsonl"
-LOG="$EXP_ROOT/results/bf16/${TAG}.log"
+TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
+
+TAG="bf16_in${INPUT_LEN}_out${OUTPUT_LEN}_c${CONCURRENCY}_n${NUM_PROMPTS}_${TIMESTAMP}"
+
+OUT="$RESULT_DIR/${TAG}.jsonl"
+LOG="$RESULT_DIR/${TAG}.log"
 
 echo "========================================"
-echo "BF16 Benchmark"
-echo "Input Len:    $INPUT_LEN"
-echo "Output Len:   $OUTPUT_LEN"
-echo "Concurrency:  $CONCURRENCY"
-echo "Num Prompts:  $NUM_PROMPTS"
+echo "Qwen2.5-7B BF16 Benchmark"
+echo "Input Len:       $INPUT_LEN"
+echo "Output Len:      $OUTPUT_LEN"
+echo "Concurrency:     $CONCURRENCY"
+echo "Num Prompts:     $NUM_PROMPTS"
+echo "Seed:            42"
+echo "Result JSONL:    $OUT"
+echo "Log:             $LOG"
 echo "========================================"
 
 python -m sglang.benchmark.serving \
@@ -40,7 +47,7 @@ python -m sglang.benchmark.serving \
     --num-prompts "$NUM_PROMPTS" \
     --random-input-len "$INPUT_LEN" \
     --random-output-len "$OUTPUT_LEN" \
-    --random-range-ratio 0 \
+    --random-range-ratio 1.0 \
     --max-concurrency "$CONCURRENCY" \
     --output-file "$OUT" \
     2>&1 | tee "$LOG"
