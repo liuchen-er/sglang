@@ -34,7 +34,7 @@ python -m sglang.benchmark.serving \
     --port 30000 \
     --model "$MODEL" \
     --tokenizer "$MODEL" \
-    --dataset-name random \
+    --dataset-name random-ids \
     --num-prompts "$NUM_PROMPTS" \
     --random-input-len "$INPUT_LEN" \
     --random-output-len "$OUTPUT_LEN" \
