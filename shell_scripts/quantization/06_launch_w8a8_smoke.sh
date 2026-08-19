@@ -8,6 +8,7 @@ export TRANSFORMERS_OFFLINE=1
 
 SGLANG_ROOT=/root/projects/sglang-qwen2-adaptive-prefill/sglang
 EXP_ROOT=/root/autodl-tmp/qwen25_quant
+export PYTHONPATH="$SGLANG_ROOT/python:${PYTHONPATH:-}"
 
 MODEL=$EXP_ROOT/quantized_models/Qwen2.5-7B-Instruct-W8A8-smoke
 
@@ -34,4 +35,6 @@ python -m sglang.launch_server \
     --host 0.0.0.0 \
     --port "$PORT" \
     --mem-fraction-static 0.80 \
+    --disable-cuda-graph \
+    --cuda-graph-backend-prefill=disabled \
     2>&1 | tee "$LOG"
